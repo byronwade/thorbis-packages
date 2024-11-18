@@ -1,1 +1,1 @@
-export * from './events';
+export { Thorbis } from './components';

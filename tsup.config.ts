@@ -1,21 +1,15 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: {
-    index: 'src/index.ts',
-    'cli/index': 'src/cli/index.ts',
-    'events/index': 'src/events/index.ts',
-  },
+  entry: ['src/index.ts'],
   format: ['esm'],
-  dts: true,
+  dts: {
+    entry: './src/index.ts',
+    resolve: true,
+  },
   splitting: false,
   sourcemap: true,
   clean: true,
   treeshake: true,
-  minify: true,
-  outDir: 'dist',
-  external: ['react', 'react-dom', 'idb'],
-  esbuildOptions(options) {
-    options.conditions = ['import', 'module'];
-  },
+  external: ['react', 'react-dom'],
 });

@@ -1,1 +1,0 @@
-export { ThorbisClient } from './ThorbisClient';
