@@ -1,20 +1,26 @@
 import type { AnalyticsInstance } from 'analytics';
 
 export abstract class BaseTracker {
-  protected analytics: AnalyticsInstance;
+  protected analytics: any;
   protected debug: boolean;
 
-  constructor(analytics: AnalyticsInstance, debug: boolean = false) {
+  constructor(analytics: any, debug: boolean = true) {
     this.analytics = analytics;
     this.debug = debug;
   }
 
-  protected log(message: string, data?: any) {
+  protected log(message: string, data?: any): void {
     if (this.debug) {
-      console.debug(`🔍 Thorbis Debug: ${message}`, data);
+      if (data) {
+        console.group(`📊 ${message}`);
+        console.log(data);
+        console.groupEnd();
+      } else {
+        console.log(`📊 ${message}`);
+      }
     }
   }
 
-  abstract init(): Promise<void> | void;
+  abstract init(): void;
   abstract cleanup(): void;
 }

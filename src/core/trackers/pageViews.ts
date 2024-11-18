@@ -74,6 +74,21 @@ interface FirstInputEntry extends PerformanceEntry {
   processingStart: number;
 }
 
+interface PageViewMetrics {
+  totalViews: number;
+  uniqueViews: number;
+  averageTimeOnPage: number;
+  bounceRate: number;
+  exitRate: number;
+  pages: Array<{
+    url: string;
+    views: number;
+    timeOnPage: number;
+    bounces: number;
+    exits: number;
+  }>;
+}
+
 export class PageViewTracker extends BaseTracker {
   private currentPageData: EnhancedPageViewData;
   private visibilityStart: number = Date.now();
@@ -83,6 +98,14 @@ export class PageViewTracker extends BaseTracker {
   private readonly IDLE_THRESHOLD = 30000; // 30 seconds
   private lastActivityTime: number = Date.now();
   private isIdle: boolean = false;
+  private metrics: PageViewMetrics = {
+    totalViews: 0,
+    uniqueViews: 0,
+    averageTimeOnPage: 0,
+    bounceRate: 0,
+    exitRate: 0,
+    pages: [],
+  };
 
   constructor(analytics: any, debug: boolean = false) {
     super(analytics, debug);
@@ -500,6 +523,10 @@ export class PageViewTracker extends BaseTracker {
       ...this.currentPageData,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  public getMetrics(): PageViewMetrics {
+    return this.metrics;
   }
 
   cleanup() {

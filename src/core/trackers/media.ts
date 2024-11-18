@@ -1,40 +1,50 @@
 import { BaseTracker } from './base';
-import type { MediaData } from './types';
+import type { MediaData, MediaProgressData, MediaDownloadData } from './types';
 
 export class MediaTracker extends BaseTracker {
-  private mediaElements: Map<
-    string,
+  private mediaElements: WeakMap<
+    HTMLMediaElement,
     {
+      mediaId: string;
       type: MediaData['type'];
       startTime: number;
       lastPosition: number;
+      metadata: {
+        title?: string;
+        source?: string;
+        quality?: string;
+        playbackRate: number;
+      };
     }
-  > = new Map();
+  > = new WeakMap();
+
+  private static PROGRESS_THRESHOLD = 5000;
+
+  private lastProgressUpdate: { [key: string]: number } = {};
 
   init() {
     if (typeof window === 'undefined') return;
 
-    // Track video elements
-    this.trackVideoElements();
-    // Track audio elements
-    this.trackAudioElements();
-    // Track downloads
-    this.trackDownloads();
-
-    // Watch for dynamically added media elements
-    this.observeNewMediaElements();
+    window.requestIdleCallback(() => {
+      this.trackVideoElements();
+      this.trackAudioElements();
+      this.trackDownloads();
+      this.observeNewMediaElements();
+    });
 
     this.log('Media tracker initialized');
   }
 
   private trackVideoElements() {
-    document.querySelectorAll('video').forEach((video) => {
+    const videos = document.getElementsByTagName('video');
+    Array.from(videos).forEach((video) => {
       this.initializeMediaTracking(video, 'video');
     });
   }
 
   private trackAudioElements() {
-    document.querySelectorAll('audio').forEach((audio) => {
+    const audios = document.getElementsByTagName('audio');
+    Array.from(audios).forEach((audio) => {
       this.initializeMediaTracking(audio, 'audio');
     });
   }
@@ -43,50 +53,121 @@ export class MediaTracker extends BaseTracker {
     element: HTMLMediaElement,
     type: 'video' | 'audio'
   ) {
-    const mediaId =
-      element.id || `media-${Math.random().toString(36).slice(2)}`;
+    const mediaId = element.id || `media-${crypto.randomUUID()}`;
 
     if (!element.id) {
       element.id = mediaId;
     }
 
-    this.mediaElements.set(mediaId, {
+    const metadata = {
+      title: element.getAttribute('title') || undefined,
+      source: element.currentSrc || undefined,
+      quality: element.getAttribute('data-quality') || undefined,
+      playbackRate: element.playbackRate,
+    };
+
+    this.mediaElements.set(element, {
+      mediaId,
       type,
-      startTime: Date.now(),
+      startTime: performance.now(),
       lastPosition: 0,
+      metadata,
     });
 
-    // Track play events
-    element.addEventListener('play', () => {
-      this.trackMediaEvent(mediaId, 'play', element.currentTime);
+    const eventOptions = { passive: true };
+
+    const events: { [key: string]: MediaData['action'] } = {
+      play: 'play',
+      pause: 'pause',
+      seeking: 'seek',
+      ended: 'complete',
+    };
+
+    Object.entries(events).forEach(([event, action]) => {
+      element.addEventListener(
+        event,
+        () => this.trackMediaEvent(element, action),
+        eventOptions
+      );
     });
 
-    // Track pause events
-    element.addEventListener('pause', () => {
-      this.trackMediaEvent(mediaId, 'pause', element.currentTime);
-    });
+    element.addEventListener(
+      'timeupdate',
+      () => this.handleTimeUpdate(element),
+      eventOptions
+    );
+  }
 
-    // Track seeking events
-    element.addEventListener('seeking', () => {
-      this.trackMediaEvent(mediaId, 'seek', element.currentTime);
-    });
+  private handleTimeUpdate(element: HTMLMediaElement) {
+    const mediaInfo = this.mediaElements.get(element);
+    if (!mediaInfo) return;
 
-    // Track completion
-    element.addEventListener('ended', () => {
-      this.trackMediaEvent(mediaId, 'complete', element.duration);
-    });
+    const now = performance.now();
+    const lastUpdate = this.lastProgressUpdate[mediaInfo.mediaId] || 0;
 
-    // Track progress periodically
-    element.addEventListener('timeupdate', () => {
-      const mediaInfo = this.mediaElements.get(mediaId);
-      if (
-        mediaInfo &&
-        Math.abs(element.currentTime - mediaInfo.lastPosition) >= 5
-      ) {
-        mediaInfo.lastPosition = element.currentTime;
-        this.trackMediaProgress(mediaId, element);
-      }
-    });
+    if (now - lastUpdate >= MediaTracker.PROGRESS_THRESHOLD) {
+      this.trackMediaProgress(element);
+      this.lastProgressUpdate[mediaInfo.mediaId] = now;
+    }
+  }
+
+  private trackMediaEvent(
+    element: HTMLMediaElement,
+    action: MediaData['action']
+  ) {
+    const mediaInfo = this.mediaElements.get(element);
+    if (!mediaInfo) return;
+
+    const eventData: MediaData = {
+      mediaId: mediaInfo.mediaId,
+      type: mediaInfo.type,
+      action,
+      position: element.currentTime,
+      timestamp: new Date().toISOString(),
+      duration: element.duration,
+      metadata: mediaInfo.metadata,
+      buffered: this.getBufferedRanges(element),
+      volume: element.volume,
+      muted: element.muted,
+      playbackRate: element.playbackRate,
+    };
+
+    this.analytics.track('mediaInteraction', eventData);
+  }
+
+  private getBufferedRanges(element: HTMLMediaElement) {
+    const ranges = [];
+    for (let i = 0; i < element.buffered.length; i++) {
+      ranges.push({
+        start: element.buffered.start(i),
+        end: element.buffered.end(i),
+      });
+    }
+    return ranges;
+  }
+
+  private trackMediaProgress(element: HTMLMediaElement) {
+    const mediaInfo = this.mediaElements.get(element);
+    if (!mediaInfo) return;
+
+    const progressData: MediaProgressData = {
+      mediaId: mediaInfo.mediaId,
+      type: mediaInfo.type,
+      position: element.currentTime,
+      duration: element.duration,
+      timestamp: new Date().toISOString(),
+      progress: (element.currentTime / element.duration) * 100,
+      metadata: mediaInfo.metadata,
+      buffered: this.getBufferedRanges(element),
+      playbackQuality: {
+        droppedFrames: (element as HTMLVideoElement).getVideoPlaybackQuality?.()
+          ?.droppedVideoFrames,
+        totalFrames: (element as HTMLVideoElement).getVideoPlaybackQuality?.()
+          ?.totalVideoFrames,
+      },
+    };
+
+    this.analytics.track('mediaProgress', progressData);
   }
 
   private trackDownloads() {
@@ -113,38 +194,6 @@ export class MediaTracker extends BaseTracker {
     });
   }
 
-  private trackMediaEvent(
-    mediaId: string,
-    action: MediaData['action'],
-    position: number
-  ) {
-    const mediaInfo = this.mediaElements.get(mediaId);
-    if (!mediaInfo) return;
-
-    const eventData: MediaData = {
-      mediaId,
-      type: mediaInfo.type,
-      action,
-      position,
-      timestamp: new Date().toISOString(),
-      duration: (document.getElementById(mediaId) as HTMLMediaElement)
-        ?.duration,
-    };
-
-    this.analytics.track('mediaInteraction', eventData);
-  }
-
-  private trackMediaProgress(mediaId: string, element: HTMLMediaElement) {
-    this.analytics.track('mediaProgress', {
-      mediaId,
-      type: this.mediaElements.get(mediaId)?.type,
-      position: element.currentTime,
-      duration: element.duration,
-      timestamp: new Date().toISOString(),
-      progress: (element.currentTime / element.duration) * 100,
-    });
-  }
-
   private observeNewMediaElements() {
     const observer = new MutationObserver((mutations) => {
       mutations.forEach((mutation) => {
@@ -162,15 +211,36 @@ export class MediaTracker extends BaseTracker {
   }
 
   cleanup() {
-    // Track final state for all media elements
-    this.mediaElements.forEach((info, mediaId) => {
-      const element = document.getElementById(mediaId) as HTMLMediaElement;
-      if (element) {
-        this.trackMediaEvent(mediaId, 'pause', element.currentTime);
+    // Store references to all media elements before cleanup
+    const mediaElements = document.querySelectorAll('video, audio');
+
+    mediaElements.forEach((element) => {
+      if (element instanceof HTMLMediaElement) {
+        const info = this.mediaElements.get(element);
+        if (!info) return;
+
+        const eventData: MediaData = {
+          mediaId: info.mediaId,
+          type: info.type,
+          action: 'pause',
+          position: element.currentTime,
+          timestamp: new Date().toISOString(),
+          duration: element.duration,
+          metadata: info.metadata,
+          buffered: this.getBufferedRanges(element),
+          volume: element.volume,
+          muted: element.muted,
+          playbackRate: element.playbackRate,
+        };
+
+        this.analytics.track('mediaInteraction', eventData);
+
+        // Delete the reference from WeakMap
+        this.mediaElements.delete(element);
       }
     });
 
-    // Clear tracking data
-    this.mediaElements.clear();
+    // Clear the progress update tracking
+    this.lastProgressUpdate = {};
   }
 }

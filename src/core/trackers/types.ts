@@ -16,11 +16,42 @@ export interface TrackerOptions {
 
 export interface MediaData {
   mediaId: string;
-  type: 'video' | 'image' | 'audio' | 'document';
-  action: 'play' | 'pause' | 'seek' | 'complete' | 'download';
+  type: 'video' | 'audio';
+  action: 'play' | 'pause' | 'seek' | 'complete';
+  position: number;
   timestamp: string;
   duration?: number;
-  position?: number;
+  metadata?: {
+    title?: string;
+    source?: string;
+    quality?: string;
+    playbackRate: number;
+  };
+  buffered?: Array<{ start: number; end: number }>;
+  volume?: number;
+  muted?: boolean;
+  playbackRate?: number;
+}
+
+export interface MediaProgressData extends Omit<MediaData, 'action'> {
+  progress: number;
+  playbackQuality?: {
+    droppedFrames?: number;
+    totalFrames?: number;
+  };
+}
+
+export interface MediaDownloadData {
+  mediaId: string;
+  type: 'document';
+  action: 'download';
+  timestamp: string;
+  url: string;
+  metadata?: {
+    fileName?: string;
+    fileSize?: number;
+    fileType?: string;
+  };
 }
 
 export interface HeatmapData {

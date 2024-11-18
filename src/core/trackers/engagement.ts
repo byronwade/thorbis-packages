@@ -1,802 +1,868 @@
 import { BaseTracker } from './base';
 
-interface EnhancedEngagementData {
-  session: {
-    id: string;
-    startTime: string;
-    duration: number;
-    isActive: boolean;
-    interactionCount: number;
-    lastInteraction: string;
-  };
-  clicks: Array<{
-    elementId?: string;
-    elementType: string;
-    elementText?: string;
-    elementClasses?: string[];
-    elementAttributes?: Record<string, string>;
-    position: {
-      x: number;
-      y: number;
-      relativeX: number; // Percentage from left
-      relativeY: number; // Percentage from top
-    };
-    context: {
-      section?: string;
-      parentId?: string;
-      nearestHeading?: string;
-      viewport: {
-        width: number;
-        height: number;
-      };
-    };
-    metadata: {
+interface EngagementMetrics {
+  interactions: {
+    rageClicks: Array<{
       timestamp: string;
-      timeFromPageLoad: number;
-      timeFromLastClick: number;
-    };
-  }>;
-  scroll: {
-    metrics: {
-      maxDepth: number;
-      averageSpeed: number;
-      totalDistance: number;
-      readingTime: number;
-      dwellTime: Record<string, number>; // Time spent at different depths
-    };
-    patterns: {
-      upScrolls: number;
-      downScrolls: number;
-      fastScrolls: number;
-      slowScrolls: number;
-      scrollPauses: Array<{
-        depth: number;
-        duration: number;
-        timestamp: string;
-      }>;
-    };
-    milestones: Array<{
-      depth: number;
-      time: string;
-      timeFromStart: number;
-      viewport: {
-        top: number;
-        bottom: number;
-      };
-    }>;
-  };
-  hover: Array<{
-    elementId?: string;
-    elementType: string;
-    elementPath: string[];
-    duration: number;
-    intentScore: number; // Calculated based on movement pattern
-    interactions: {
-      clicks: number;
-      scrolls: number;
-      keyPresses: number;
-    };
-    position: {
-      entryPoint: { x: number; y: number };
-      exitPoint: { x: number; y: number };
-      path: Array<{ x: number; y: number; t: number }>;
-    };
-    metadata: {
-      timestamp: string;
-      entryTime: string;
-      exitTime: string;
-    };
-  }>;
-  attention: {
-    metrics: {
-      totalActiveTime: number;
-      totalIdleTime: number;
-      attentionScore: number;
-      focusChanges: number;
-    };
-    segments: Array<{
-      type: 'active' | 'idle' | 'hidden';
-      startTime: string;
-      duration: number;
-      endReason: string;
-    }>;
-    interactions: {
-      keyboard: {
-        keyPressCount: number;
-        typingSpeed: number;
-        commonKeys: Record<string, number>;
-      };
-      mouse: {
-        moveDistance: number;
-        moveSpeed: number;
-        clickAccuracy: number;
-      };
-      touch: {
-        tapCount: number;
-        swipeDistance: number;
-        pinchZooms: number;
-      };
-    };
-  };
-  content: {
-    visibility: Array<{
       elementId: string;
-      type: string;
-      viewportTime: number;
-      inViewPercentage: number;
-      engagementScore: number;
-      interactions: number;
+      clickCount: number;
+      elementType: string;
     }>;
-    sections: Record<
-      string,
-      {
-        timeSpent: number;
-        interactions: number;
-        scrollDepth: number;
-        engagementScore: number;
-      }
-    >;
-    elements: Record<
-      string,
-      {
-        views: number;
-        clicks: number;
-        hovers: number;
-        timeVisible: number;
-      }
-    >;
+    rapidScrolling: Array<{
+      timestamp: string;
+      duration: number;
+      direction: 'up' | 'down';
+      velocity: number;
+    }>;
+    multiClicks: Array<{
+      timestamp: string;
+      elementId: string;
+      frequency: number; // clicks per second
+      pattern: 'double' | 'triple' | 'multiple';
+    }>;
+    deadClicks: Array<{
+      timestamp: string;
+      position: { x: number; y: number };
+      nearestInteractive: string;
+    }>;
+    rapidInteractions: Array<{
+      timestamp: string;
+      type: 'click' | 'scroll' | 'keypress';
+      frequency: number;
+      duration: number;
+    }>;
+    hovers: Array<{
+      timestamp: string;
+      elementType: string;
+      elementId: string;
+      content: string;
+      duration: number;
+      intentScore: number;
+    }>;
+    textSelections: Array<{
+      timestamp: string;
+      text: string;
+      elementType: string;
+      elementPath: string;
+      selectionLength: number;
+      duration: number;
+      context: {
+        paragraph?: string;
+        nearestHeading?: string;
+      };
+    }>;
   };
 }
 
+interface ScrollPattern {
+  type: 'smooth' | 'rapid' | 'erratic' | 'jump';
+  startTime: number;
+  endTime: number;
+  startPosition: number;
+  endPosition: number;
+  velocity: number;
+  directionChanges: number;
+}
+
 export class EngagementTracker extends BaseTracker {
-  private data: EnhancedEngagementData;
-  private lastClickTime: number = 0;
-  private lastScrollPosition: number = 0;
-  private lastScrollTime: number = 0;
-  private lastKeyPressTime: number = 0;
-  private keyPressIntervals: number[] = [];
-  private scrollTimeout: NodeJS.Timeout | null = null;
-  private currentElement: HTMLElement | null = null;
+  private metrics: EngagementMetrics;
+  private lastScrollY: number = 0;
+  private scrollStartTime: number = 0;
+  private readonly RAGE_CLICK_THRESHOLD = 3;
+  private readonly RAGE_CLICK_INTERVAL = 1000; // ms
+  private readonly RAPID_SCROLL_THRESHOLD = 1000; // pixels per second
+  private recentClicks: Map<string, { count: number; timestamp: number }> =
+    new Map();
   private currentHover: {
     element: HTMLElement;
     startTime: number;
-    position: {
-      path: Array<{ x: number; y: number; t: number }>;
-    };
-    metadata: {
-      entryTime: string;
-    };
+    content: string;
   } | null = null;
-  private visibilityTimers: Map<string, number> = new Map();
-  private readonly SCROLL_PAUSE_THRESHOLD = 1500; // ms
-  private readonly FAST_SCROLL_THRESHOLD = 100; // pixels per second
-  private touchStartPosition: { x: number; y: number; time: number } | null =
-    null;
+  private readonly CONTENT_SELECTORS = [
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'button',
+    'a',
+    'input[type="text"]',
+    'input[type="search"]',
+    'input[type="email"]',
+    'input[type="tel"]',
+    'input[type="number"]',
+    'input[type="password"]',
+    'textarea',
+    'select',
+    'img[alt]',
+    'video[controls]',
+    'audio[controls]',
+    'span[data-content]',
+    'label:not(:empty)',
+    'p:not(:empty)',
+    '[role="button"]',
+    '[role="link"]',
+    '[role="menuitem"]',
+    '[data-tracking]',
+    '[data-interactive]',
+  ].join(',');
 
-  constructor(analytics: any, debug: boolean = false) {
-    super(analytics, debug);
-    this.data = this.initializeEngagementData();
+  private readonly SCROLL_THRESHOLDS = {
+    SMOOTH: 100, // pixels per second (slower)
+    RAPID: 800, // pixels per second (faster)
+    ERRATIC_CHANGES: 2, // direction changes within timeframe
+    PATTERN_TIMEFRAME: 500, // ms to analyze pattern (shorter for more responsive)
+    JUMP_THRESHOLD: 800, // pixels
+    MIN_DISTANCE: 100, // minimum distance to track
+    THROTTLE: 50, // ms between scroll events
+  };
 
-    // Bind methods
-    this.handleClick = this.handleClick.bind(this);
-    this.handleScroll = this.handleScroll.bind(this);
-    this.handleMouseMove = this.handleMouseMove.bind(this);
-    this.handleVisibilityChange = this.handleVisibilityChange.bind(this);
-    this.handleKeyboard = this.handleKeyboard.bind(this);
-    this.handleTouch = this.handleTouch.bind(this);
+  private scrollHistory: Array<{
+    position: number;
+    timestamp: number;
+    pageHeight: number;
+    viewportHeight: number;
+  }> = [];
+  private currentScrollPattern: ScrollPattern | null = null;
+  private lastScrollEvent = 0;
+  private scrollPatternTimeout: NodeJS.Timeout | null = null;
+
+  private readonly BATCH_CONFIG = {
+    HOVER_DELAY: 10, // ms to wait before sending hover events
+    SCROLL_DELAY: 100, // ms to wait before sending scroll events
+    MAX_BATCH_SIZE: 10, // max events to batch together
+  };
+
+  private eventBatches = {
+    hovers: [] as any[],
+    scrolls: [] as any[],
+    hoverTimeout: null as NodeJS.Timeout | null,
+    scrollTimeout: null as NodeJS.Timeout | null,
+  };
+
+  private currentSelection: {
+    startTime: number;
+    text: string;
+    element: HTMLElement;
+  } | null = null;
+
+  constructor(analytics: any) {
+    super(analytics);
+    this.metrics = this.initializeMetrics();
   }
 
-  init() {
+  init(): void {
     if (typeof window === 'undefined') return;
 
-    // Initialize event listeners
-    window.addEventListener('click', this.handleClick);
-    window.addEventListener('scroll', this.handleScroll);
-    window.addEventListener('mousemove', this.handleMouseMove);
-    document.addEventListener('visibilitychange', this.handleVisibilityChange);
-    window.addEventListener('keydown', this.handleKeyboard);
-    window.addEventListener('touchstart', this.handleTouch);
-    window.addEventListener('touchmove', this.handleTouch);
-    window.addEventListener('touchend', this.handleTouch);
+    // Bind methods to preserve 'this' context
+    this.handleSelectionChange = this.handleSelectionChange.bind(this);
+    this.handleSelectionEnd = this.handleSelectionEnd.bind(this);
 
-    // Initialize content observers
-    this.initializeContentObservers();
+    // Add selection event listeners
+    document.addEventListener('selectionchange', this.handleSelectionChange);
+    document.addEventListener('mouseup', this.handleSelectionEnd);
+    document.addEventListener('keyup', this.handleSelectionEnd);
 
-    this.log('Engagement tracker initialized');
+    // Existing listeners
+    window.addEventListener('mouseover', this.handleMouseOver.bind(this), {
+      passive: true,
+    });
+    window.addEventListener('mouseout', this.handleMouseOut.bind(this), {
+      passive: true,
+    });
+    window.addEventListener('click', this.handleClick.bind(this), {
+      passive: true,
+    });
+    window.addEventListener('scroll', this.handleScroll.bind(this), {
+      passive: true,
+    });
+
+    setInterval(() => {
+      this.log('Current engagement metrics:', this.metrics);
+    }, 10000);
+
+    this.log('Engagement tracker initialized with text selection tracking');
   }
 
-  private initializeEngagementData(): EnhancedEngagementData {
+  private initializeMetrics(): EngagementMetrics {
     return {
-      session: {
-        id: `session_${Math.random().toString(36).slice(2)}`,
-        startTime: new Date().toISOString(),
-        duration: 0,
-        isActive: true,
-        interactionCount: 0,
-        lastInteraction: new Date().toISOString(),
-      },
-      clicks: [],
-      scroll: {
-        metrics: {
-          maxDepth: 0,
-          averageSpeed: 0,
-          totalDistance: 0,
-          readingTime: 0,
-          dwellTime: {},
-        },
-        patterns: {
-          upScrolls: 0,
-          downScrolls: 0,
-          fastScrolls: 0,
-          slowScrolls: 0,
-          scrollPauses: [],
-        },
-        milestones: [],
-      },
-      hover: [],
-      attention: {
-        metrics: {
-          totalActiveTime: 0,
-          totalIdleTime: 0,
-          attentionScore: 0,
-          focusChanges: 0,
-        },
-        segments: [
-          {
-            type: 'active',
-            startTime: new Date().toISOString(),
-            duration: 0,
-            endReason: 'init',
-          },
-        ],
-        interactions: {
-          keyboard: {
-            keyPressCount: 0,
-            typingSpeed: 0,
-            commonKeys: {},
-          },
-          mouse: {
-            moveDistance: 0,
-            moveSpeed: 0,
-            clickAccuracy: 0,
-          },
-          touch: {
-            tapCount: 0,
-            swipeDistance: 0,
-            pinchZooms: 0,
-          },
-        },
-      },
-      content: {
-        visibility: [],
-        sections: {},
-        elements: {},
+      interactions: {
+        rageClicks: [],
+        rapidScrolling: [],
+        multiClicks: [],
+        deadClicks: [],
+        rapidInteractions: [],
+        hovers: [], // Add hovers array
+        textSelections: [],
       },
     };
   }
 
   private handleClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
+    const elementId = target.id || target.tagName;
     const now = Date.now();
-    const timeFromLastClick = this.lastClickTime ? now - this.lastClickTime : 0;
 
-    // Get element path
-    const elementPath = this.getElementPath(target);
+    // Track rage clicks
+    const recentClick = this.recentClicks.get(elementId);
+    if (recentClick) {
+      if (now - recentClick.timestamp < this.RAGE_CLICK_INTERVAL) {
+        recentClick.count++;
+        if (recentClick.count >= this.RAGE_CLICK_THRESHOLD) {
+          const rageClick = {
+            timestamp: new Date().toISOString(),
+            elementId,
+            clickCount: recentClick.count,
+            elementType: target.tagName.toLowerCase(),
+          };
+          this.metrics.interactions.rageClicks.push(rageClick);
+          this.log('Rage click detected:', rageClick);
+          this.analytics.track('rageClick', rageClick);
+          this.recentClicks.delete(elementId);
+        }
+      } else {
+        this.recentClicks.set(elementId, { count: 1, timestamp: now });
+      }
+    } else {
+      this.recentClicks.set(elementId, { count: 1, timestamp: now });
+    }
 
-    // Calculate relative position
-    const { width, height } = document.documentElement.getBoundingClientRect();
-    const relativeX = (event.pageX / width) * 100;
-    const relativeY = (event.pageY / height) * 100;
-
-    const clickData = {
-      elementId: target.id,
-      elementType: target.tagName,
-      elementText: target.textContent?.slice(0, 100),
-      elementClasses: Array.from(target.classList),
-      elementAttributes: this.getElementAttributes(target),
-      position: {
-        x: event.pageX,
-        y: event.pageY,
-        relativeX,
-        relativeY,
-      },
-      context: {
-        section: this.getNearestSection(target),
-        parentId: target.parentElement?.id,
-        nearestHeading: this.getNearestHeading(target),
-        viewport: {
-          width: window.innerWidth,
-          height: window.innerHeight,
-        },
-      },
-      metadata: {
+    // Track dead clicks
+    if (!this.isInteractiveElement(target)) {
+      const deadClick = {
         timestamp: new Date().toISOString(),
-        timeFromPageLoad: now - new Date(this.data.session.startTime).getTime(),
-        timeFromLastClick,
-      },
-    };
-
-    this.data.clicks.push(clickData);
-    this.updateElementEngagement(target.id || target.tagName, 'click');
-    this.trackInteraction('click', clickData);
-    this.lastClickTime = now;
+        position: { x: event.pageX, y: event.pageY },
+        nearestInteractive: this.findNearestInteractiveElement(target),
+      };
+      this.metrics.interactions.deadClicks.push(deadClick);
+      this.log('Dead click detected:', deadClick);
+      this.analytics.track('deadClick', deadClick);
+    }
   }
 
-  private handleScroll() {
+  private handleScroll = () => {
     const now = Date.now();
-    const currentPosition = window.scrollY;
-    const timeDiff = now - this.lastScrollTime;
+    const currentScrollY = window.scrollY;
 
-    if (timeDiff > 0) {
-      const scrollSpeed =
-        Math.abs(currentPosition - this.lastScrollPosition) / timeDiff;
-      const isFastScroll = scrollSpeed > this.FAST_SCROLL_THRESHOLD;
-
-      // Update scroll patterns
-      if (currentPosition > this.lastScrollPosition) {
-        this.data.scroll.patterns.downScrolls++;
-      } else {
-        this.data.scroll.patterns.upScrolls++;
-      }
-
-      if (isFastScroll) {
-        this.data.scroll.patterns.fastScrolls++;
-      } else {
-        this.data.scroll.patterns.slowScrolls++;
-      }
-
-      // Update scroll metrics
-      this.data.scroll.metrics.totalDistance += Math.abs(
-        currentPosition - this.lastScrollPosition
-      );
-      this.data.scroll.metrics.averageSpeed =
-        (this.data.scroll.metrics.averageSpeed *
-          (this.data.scroll.patterns.downScrolls +
-            this.data.scroll.patterns.upScrolls -
-            1) +
-          scrollSpeed) /
-        (this.data.scroll.patterns.downScrolls +
-          this.data.scroll.patterns.upScrolls);
-
-      // Track scroll milestones
-      const scrollPercentage = this.calculateScrollPercentage();
-      if (scrollPercentage > this.data.scroll.metrics.maxDepth) {
-        this.data.scroll.metrics.maxDepth = scrollPercentage;
-        this.data.scroll.milestones.push({
-          depth: scrollPercentage,
-          time: new Date().toISOString(),
-          timeFromStart: now - new Date(this.data.session.startTime).getTime(),
-          viewport: {
-            top: window.scrollY,
-            bottom: window.scrollY + window.innerHeight,
-          },
-        });
-      }
-
-      // Track scroll pauses
-      if (this.scrollTimeout) {
-        clearTimeout(this.scrollTimeout);
-      }
-
-      this.scrollTimeout = setTimeout(() => {
-        this.data.scroll.patterns.scrollPauses.push({
-          depth: scrollPercentage,
-          duration: this.SCROLL_PAUSE_THRESHOLD,
-          timestamp: new Date().toISOString(),
-        });
-        this.trackInteraction('scrollPause', {
-          depth: scrollPercentage,
-          duration: this.SCROLL_PAUSE_THRESHOLD,
-        });
-      }, this.SCROLL_PAUSE_THRESHOLD);
-
-      // Update dwell time
-      const depthKey = Math.floor(scrollPercentage / 10) * 10;
-      this.data.scroll.metrics.dwellTime[depthKey] =
-        (this.data.scroll.metrics.dwellTime[depthKey] || 0) + timeDiff;
-
-      this.trackInteraction('scroll', {
-        depth: scrollPercentage,
-        speed: scrollSpeed,
-        direction: currentPosition > this.lastScrollPosition ? 'down' : 'up',
-      });
+    // Throttle scroll events
+    if (now - this.lastScrollEvent < this.SCROLL_THRESHOLDS.THROTTLE) {
+      return;
     }
+    this.lastScrollEvent = now;
 
-    this.lastScrollPosition = currentPosition;
-    this.lastScrollTime = now;
-  }
-
-  private handleMouseMove(event: MouseEvent) {
-    // Update mouse metrics
-    const { movementX, movementY } = event;
-    const distance = Math.sqrt(movementX ** 2 + movementY ** 2);
-    this.data.attention.interactions.mouse.moveDistance += distance;
-
-    const timeDiff = Date.now() - this.lastScrollTime;
-    if (timeDiff > 0) {
-      this.data.attention.interactions.mouse.moveSpeed = distance / timeDiff;
-    }
-
-    // Track hover behavior
-    const target = event.target as HTMLElement;
-    if (target !== this.currentElement) {
-      if (this.currentElement) {
-        this.endHover(event);
-      }
-      this.startHover(event);
-    } else if (this.currentHover) {
-      this.currentHover.position.path.push({
-        x: event.pageX,
-        y: event.pageY,
-        t:
-          Date.now() - new Date(this.currentHover.metadata.entryTime).getTime(),
-      });
-    }
-  }
-
-  private handleVisibilityChange() {
-    const isHidden = document.hidden;
-    const now = new Date().toISOString();
-    const lastSegment =
-      this.data.attention.segments[this.data.attention.segments.length - 1];
-
-    // End current segment
-    lastSegment.duration =
-      new Date(now).getTime() - new Date(lastSegment.startTime).getTime();
-    lastSegment.endReason = isHidden ? 'tab_hidden' : 'tab_visible';
-
-    // Start new segment
-    this.data.attention.segments.push({
-      type: isHidden ? 'hidden' : 'active',
-      startTime: now,
-      duration: 0,
-      endReason: 'ongoing',
-    });
-
-    // Update metrics
-    this.data.attention.metrics.focusChanges++;
-    this.updateAttentionMetrics();
-
-    this.trackInteraction('visibility', {
-      isHidden,
+    // Add to scroll history
+    this.scrollHistory.push({
+      position: currentScrollY,
       timestamp: now,
+      pageHeight: document.documentElement.scrollHeight,
+      viewportHeight: window.innerHeight,
     });
-  }
 
-  private handleKeyboard(event: KeyboardEvent) {
-    this.data.attention.interactions.keyboard.keyPressCount++;
-    this.data.attention.interactions.keyboard.commonKeys[event.key] =
-      (this.data.attention.interactions.keyboard.commonKeys[event.key] || 0) +
-      1;
-
-    // Calculate typing speed
-    const now = Date.now();
-    const timeDiff = now - this.lastKeyPressTime;
-    if (this.lastKeyPressTime && timeDiff < 2000) {
-      // Only count if within 2 seconds of last press
-      this.keyPressIntervals.push(timeDiff);
-      this.data.attention.interactions.keyboard.typingSpeed =
-        60000 /
-        (this.keyPressIntervals.reduce((a, b) => a + b, 0) /
-          this.keyPressIntervals.length);
-    }
-    this.lastKeyPressTime = now;
-
-    this.trackInteraction('keyboard', {
-      key: event.key,
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  private handleTouch(event: TouchEvent) {
-    switch (event.type) {
-      case 'touchstart':
-        this.handleTouchStart(event);
-        break;
-      case 'touchmove':
-        this.handleTouchMove(event);
-        break;
-      case 'touchend':
-        this.handleTouchEnd(event);
-        break;
-    }
-  }
-
-  private initializeContentObservers() {
-    // Create intersection observer for content visibility
-    const visibilityObserver = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          const element = entry.target;
-          const elementId = element.id || element.tagName;
-
-          if (!this.data.content.elements[elementId]) {
-            this.data.content.elements[elementId] = {
-              views: 0,
-              clicks: 0,
-              hovers: 0,
-              timeVisible: 0,
-            };
-          }
-
-          if (entry.isIntersecting) {
-            this.data.content.elements[elementId].views++;
-            this.startVisibilityTimer(elementId, entry.intersectionRatio);
-          } else {
-            this.stopVisibilityTimer(elementId);
-          }
-        });
-      },
-      {
-        threshold: [0, 0.25, 0.5, 0.75, 1],
-      }
+    // Keep only recent history
+    this.scrollHistory = this.scrollHistory.filter(
+      (entry) =>
+        now - entry.timestamp <= this.SCROLL_THRESHOLDS.PATTERN_TIMEFRAME
     );
 
-    // Observe important elements
-    document
-      .querySelectorAll('h1, h2, h3, p, img, video, button, a')
-      .forEach((element) => visibilityObserver.observe(element));
+    // Only analyze if we have enough data points
+    if (this.scrollHistory.length >= 2) {
+      this.detectScrollPattern();
+    }
+  };
+
+  private detectScrollPattern() {
+    const latest = this.scrollHistory[this.scrollHistory.length - 1];
+    const first = this.scrollHistory[0];
+
+    const duration = latest.timestamp - first.timestamp;
+    const distance = Math.abs(latest.position - first.position);
+    const velocity = (distance / duration) * 1000; // pixels per second
+    const directionChanges = this.countDirectionChanges();
+    const percentScrolled =
+      (distance / document.documentElement.scrollHeight) * 100;
+
+    // Determine pattern type
+    let type: ScrollPattern['type'];
+    let shouldLog = false;
+
+    if (distance < this.SCROLL_THRESHOLDS.MIN_DISTANCE) {
+      return; // Ignore tiny scrolls
+    }
+
+    if (directionChanges >= this.SCROLL_THRESHOLDS.ERRATIC_CHANGES) {
+      type = 'erratic';
+      shouldLog = true;
+    } else if (
+      distance >= this.SCROLL_THRESHOLDS.JUMP_THRESHOLD &&
+      duration < 300
+    ) {
+      type = 'jump';
+      shouldLog = true;
+    } else if (velocity >= this.SCROLL_THRESHOLDS.RAPID) {
+      type = 'rapid';
+      shouldLog = true;
+    } else if (velocity <= this.SCROLL_THRESHOLDS.SMOOTH) {
+      type = 'smooth';
+      shouldLog = distance >= this.SCROLL_THRESHOLDS.MIN_DISTANCE;
+    } else {
+      return; // Ignore intermediate scrolls
+    }
+
+    if (shouldLog) {
+      const pattern = {
+        timestamp: new Date().toISOString(),
+        type,
+        metrics: {
+          duration,
+          distance,
+          velocity,
+          directionChanges,
+          percentScrolled,
+        },
+        positions: {
+          start: first.position,
+          end: latest.position,
+          pageHeight: latest.pageHeight,
+          viewportHeight: latest.viewportHeight,
+        },
+        context: {
+          readingTime: duration >= 1000 && type === 'smooth',
+          isJumpy: type === 'jump' || type === 'erratic',
+          isSkimming: type === 'rapid' && percentScrolled > 30,
+        },
+      };
+
+      // Add to batch instead of sending immediately
+      this.eventBatches.scrolls.push(pattern);
+
+      if (this.eventBatches.scrollTimeout) {
+        clearTimeout(this.eventBatches.scrollTimeout);
+      }
+
+      this.eventBatches.scrollTimeout = setTimeout(() => {
+        if (this.eventBatches.scrolls.length > 0) {
+          // Send consolidated scroll patterns
+          this.analytics.track('scrollPatterns', {
+            patterns: this.eventBatches.scrolls,
+            count: this.eventBatches.scrolls.length,
+            summary: this.summarizeScrollPatterns(this.eventBatches.scrolls),
+          });
+          this.eventBatches.scrolls = [];
+        }
+      }, this.BATCH_CONFIG.SCROLL_DELAY);
+
+      // Reset history after logging
+      this.scrollHistory = [latest];
+    }
   }
 
-  // Helper methods
-  private getElementPath(element: HTMLElement): string[] {
+  private countDirectionChanges(): number {
+    let changes = 0;
+    let lastDirection = 0;
+
+    for (let i = 1; i < this.scrollHistory.length; i++) {
+      const currentDirection = Math.sign(
+        this.scrollHistory[i].position - this.scrollHistory[i - 1].position
+      );
+
+      if (currentDirection !== 0 && currentDirection !== lastDirection) {
+        changes++;
+        lastDirection = currentDirection;
+      }
+    }
+
+    return changes;
+  }
+
+  private isInteractiveElement(element: HTMLElement): boolean {
+    const interactiveTags = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'];
+    return (
+      interactiveTags.includes(element.tagName) ||
+      element.hasAttribute('onclick') ||
+      element.hasAttribute('role') ||
+      window.getComputedStyle(element).cursor === 'pointer'
+    );
+  }
+
+  private findNearestInteractiveElement(element: HTMLElement): string {
+    const interactiveElement = element.closest(
+      'a, button, input, select, textarea, [role="button"]'
+    );
+    if (interactiveElement) {
+      return `${interactiveElement.tagName.toLowerCase()}${
+        interactiveElement.id ? `#${interactiveElement.id}` : ''
+      }`;
+    }
+    return 'none';
+  }
+
+  private isContentElement(element: HTMLElement): boolean {
+    // Skip body, html, article, section, div, and other structural elements
+    const skipTags = [
+      'BODY',
+      'HTML',
+      'ARTICLE',
+      'SECTION',
+      'DIV',
+      'MAIN',
+      'ASIDE',
+      'NAV',
+      'HEADER',
+      'FOOTER',
+    ];
+    if (skipTags.includes(element.tagName)) {
+      return false;
+    }
+
+    // Check if it's one of our specific content elements
+    if (element.matches(this.CONTENT_SELECTORS)) {
+      // For images, ensure they have alt text
+      if (element.tagName === 'IMG') {
+        return !!element.getAttribute('alt');
+      }
+      // For text elements, ensure they have content
+      if (['SPAN', 'P', 'LABEL'].includes(element.tagName)) {
+        const text = element.textContent?.trim();
+        return !!text && text.length > 0;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  private handleMouseOver(event: MouseEvent) {
+    const target = event.target as HTMLElement;
+
+    // Try to find the nearest content element
+    const contentElement = target.closest(
+      this.CONTENT_SELECTORS
+    ) as HTMLElement;
+
+    if (contentElement && this.isContentElement(contentElement)) {
+      let content: string;
+
+      // Get appropriate content based on element type
+      if (contentElement.tagName === 'IMG') {
+        content = contentElement.getAttribute('alt') || 'image';
+      } else if (contentElement instanceof HTMLInputElement) {
+        content = contentElement.value || contentElement.placeholder || 'input';
+      } else if (contentElement instanceof HTMLSelectElement) {
+        content =
+          contentElement.options[contentElement.selectedIndex]?.text ||
+          'select';
+      } else {
+        content =
+          contentElement.textContent?.trim() ||
+          contentElement.getAttribute('aria-label') ||
+          'no-content';
+      }
+
+      this.currentHover = {
+        element: contentElement,
+        startTime: Date.now(),
+        content: content.slice(0, 100),
+      };
+
+      this.log('Content hover started:', {
+        elementType: contentElement.tagName.toLowerCase(),
+        content: content.slice(0, 50) + (content.length > 50 ? '...' : ''),
+      });
+    }
+  }
+
+  private handleMouseOut(event: MouseEvent) {
+    if (!this.currentHover) return;
+
+    const duration = Date.now() - this.currentHover.startTime;
+
+    if (duration >= 100) {
+      const hoverData = {
+        timestamp: new Date().toISOString(),
+        elementType: this.currentHover.element.tagName.toLowerCase(),
+        elementId: this.currentHover.element.id || 'no-id',
+        content: this.currentHover.content,
+        duration,
+        intentScore: this.calculateIntentScore(duration),
+      };
+
+      // Add to batch instead of sending immediately
+      this.eventBatches.hovers.push(hoverData);
+
+      // Clear existing timeout
+      if (this.eventBatches.hoverTimeout) {
+        clearTimeout(this.eventBatches.hoverTimeout);
+      }
+
+      // Set new timeout to send batch
+      this.eventBatches.hoverTimeout = setTimeout(() => {
+        if (this.eventBatches.hovers.length > 0) {
+          this.analytics.track('contentHovers', {
+            hovers: this.eventBatches.hovers,
+            count: this.eventBatches.hovers.length,
+          });
+          this.eventBatches.hovers = [];
+        }
+      }, this.BATCH_CONFIG.HOVER_DELAY);
+    }
+
+    this.currentHover = null;
+  }
+
+  private calculateIntentScore(duration: number): number {
+    // Basic intent scoring based on hover duration
+    // 0-500ms: 0-25
+    // 500-2000ms: 25-75
+    // 2000ms+: 75-100
+    if (duration < 500) {
+      return (duration / 500) * 25;
+    } else if (duration < 2000) {
+      return 25 + ((duration - 500) / 1500) * 50;
+    }
+    return 75 + Math.min(((duration - 2000) / 3000) * 25, 25);
+  }
+
+  public getMetrics(): EngagementMetrics {
+    return this.metrics;
+  }
+
+  cleanup() {
+    // Remove selection listeners
+    document.removeEventListener('selectionchange', this.handleSelectionChange);
+    document.removeEventListener('mouseup', this.handleSelectionEnd);
+    document.removeEventListener('keyup', this.handleSelectionEnd);
+
+    // Flush any remaining batched events
+    if (this.eventBatches.hovers.length > 0) {
+      this.analytics.track('contentHovers', {
+        hovers: this.eventBatches.hovers,
+        count: this.eventBatches.hovers.length,
+      });
+    }
+
+    if (this.eventBatches.scrolls.length > 0) {
+      this.analytics.track('scrollPatterns', {
+        patterns: this.eventBatches.scrolls,
+        count: this.eventBatches.scrolls.length,
+        summary: this.summarizeScrollPatterns(this.eventBatches.scrolls),
+      });
+    }
+
+    // Clear timeouts
+    if (this.eventBatches.hoverTimeout)
+      clearTimeout(this.eventBatches.hoverTimeout);
+    if (this.eventBatches.scrollTimeout)
+      clearTimeout(this.eventBatches.scrollTimeout);
+
+    // Existing cleanup code...
+    window.removeEventListener('mouseover', this.handleMouseOver);
+    window.removeEventListener('mouseout', this.handleMouseOut);
+    window.removeEventListener('click', this.handleClick);
+    window.removeEventListener('scroll', this.handleScroll);
+
+    this.analytics.track('userEngagement', this.getMetrics());
+  }
+
+  private summarizeScrollPatterns(patterns: any[]) {
+    return {
+      dominantPattern: this.findDominantPattern(patterns),
+      averageVelocity: this.calculateAverageVelocity(patterns),
+      totalDistance: patterns.reduce((sum, p) => sum + p.metrics.distance, 0),
+      readingTimePercentage:
+        (patterns.filter((p) => p.context.readingTime).length /
+          patterns.length) *
+        100,
+      skimmingPercentage:
+        (patterns.filter((p) => p.context.isSkimming).length /
+          patterns.length) *
+        100,
+    };
+  }
+
+  private findDominantPattern(patterns: any[]): {
+    type: ScrollPattern['type'];
+    frequency: number;
+    duration: number;
+  } {
+    const patternCounts = patterns.reduce((acc, pattern) => {
+      acc[pattern.type] = (acc[pattern.type] || 0) + 1;
+      return acc;
+    }, {} as Record<ScrollPattern['type'], number>);
+
+    const dominantType = Object.entries(patternCounts).reduce((a, b) =>
+      patternCounts[a[0]] > patternCounts[b[0]] ? a : b
+    )[0] as ScrollPattern['type'];
+
+    const dominantPatterns = patterns.filter((p) => p.type === dominantType);
+    const totalDuration = dominantPatterns.reduce(
+      (sum, p) => sum + p.metrics.duration,
+      0
+    );
+
+    return {
+      type: dominantType,
+      frequency: (patternCounts[dominantType] / patterns.length) * 100,
+      duration: totalDuration,
+    };
+  }
+
+  private calculateAverageVelocity(
+    patterns: Array<{
+      type: ScrollPattern['type'];
+      metrics: { velocity: number };
+    }>
+  ): {
+    average: number;
+    peak: number;
+    breakdown: Record<ScrollPattern['type'], number>;
+  } {
+    if (patterns.length === 0) {
+      return {
+        average: 0,
+        peak: 0,
+        breakdown: {
+          smooth: 0,
+          rapid: 0,
+          erratic: 0,
+          jump: 0,
+        },
+      };
+    }
+
+    let peak = 0;
+    const velocities: number[] = [];
+    const typeVelocities: Record<ScrollPattern['type'], number[]> = {
+      smooth: [],
+      rapid: [],
+      erratic: [],
+      jump: [],
+    };
+
+    patterns.forEach((pattern) => {
+      const velocity = pattern.metrics.velocity;
+      velocities.push(velocity);
+      peak = Math.max(peak, velocity);
+
+      if (pattern.type in typeVelocities) {
+        typeVelocities[pattern.type].push(velocity);
+      }
+    });
+
+    const breakdown = Object.keys(typeVelocities).reduce((acc, type) => {
+      const vals = typeVelocities[type as ScrollPattern['type']];
+      acc[type as ScrollPattern['type']] =
+        vals.length > 0 ? vals.reduce((sum, v) => sum + v, 0) / vals.length : 0;
+      return acc;
+    }, {} as Record<ScrollPattern['type'], number>);
+
+    return {
+      average: velocities.reduce((sum, v) => sum + v, 0) / velocities.length,
+      peak,
+      breakdown,
+    };
+  }
+
+  private getScrollDepthMilestones(patterns: any[]): {
+    milestones: number[];
+    timeToReach: Record<number, number>;
+  } {
+    const depths = new Set<number>();
+    const timeToReach: Record<number, number> = {};
+    const startTime = new Date(patterns[0].timestamp).getTime();
+
+    patterns.forEach((pattern) => {
+      const depth = Math.floor(pattern.metrics.percentScrolled / 25) * 25;
+      if (depth > 0 && !depths.has(depth)) {
+        depths.add(depth);
+        timeToReach[depth] = new Date(pattern.timestamp).getTime() - startTime;
+      }
+    });
+
+    return {
+      milestones: Array.from(depths).sort((a, b) => a - b),
+      timeToReach,
+    };
+  }
+
+  private getReadingPatternInsights(patterns: any[]): {
+    readingStyle: 'thorough' | 'skimming' | 'scanning' | 'mixed';
+    confidence: number;
+    metrics: {
+      averageReadingTime: number;
+      contentCoverage: number;
+      consistencyScore: number;
+    };
+  } {
+    const readingPatterns = patterns.filter((p) => p.context.readingTime);
+    const skimmingPatterns = patterns.filter((p) => p.context.isSkimming);
+    const jumpPatterns = patterns.filter((p) => p.context.isJumpy);
+
+    const totalPatterns = patterns.length;
+    const readingRatio = readingPatterns.length / totalPatterns;
+    const skimmingRatio = skimmingPatterns.length / totalPatterns;
+    const jumpRatio = jumpPatterns.length / totalPatterns;
+
+    let readingStyle: 'thorough' | 'skimming' | 'scanning' | 'mixed';
+    let confidence: number;
+
+    if (readingRatio > 0.6) {
+      readingStyle = 'thorough';
+      confidence = readingRatio * 100;
+    } else if (skimmingRatio > 0.6) {
+      readingStyle = 'skimming';
+      confidence = skimmingRatio * 100;
+    } else if (jumpRatio > 0.6) {
+      readingStyle = 'scanning';
+      confidence = jumpRatio * 100;
+    } else {
+      readingStyle = 'mixed';
+      confidence = Math.max(readingRatio, skimmingRatio, jumpRatio) * 100;
+    }
+
+    const averageReadingTime =
+      readingPatterns.reduce((sum, p) => sum + p.metrics.duration, 0) /
+      (readingPatterns.length || 1);
+
+    const contentCoverage = Math.max(
+      ...patterns.map((p) => p.metrics.percentScrolled)
+    );
+
+    const velocityStdDev = this.calculateVelocityStandardDeviation(patterns);
+    const consistencyScore = Math.max(0, 100 - velocityStdDev / 10);
+
+    return {
+      readingStyle,
+      confidence,
+      metrics: {
+        averageReadingTime,
+        contentCoverage,
+        consistencyScore,
+      },
+    };
+  }
+
+  private calculateVelocityStandardDeviation(patterns: any[]): number {
+    const velocities = patterns.map((p) => p.metrics.velocity);
+    const mean = velocities.reduce((sum, v) => sum + v, 0) / velocities.length;
+    const squaredDiffs = velocities.map((v) => Math.pow(v - mean, 2));
+    const variance =
+      squaredDiffs.reduce((sum, sq) => sum + sq, 0) / velocities.length;
+    return Math.sqrt(variance);
+  }
+
+  private handleSelectionChange() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) {
+      this.currentSelection = null;
+      return;
+    }
+
+    const text = selection.toString().trim();
+    if (!text) return;
+
+    const range = selection.getRangeAt(0);
+    const element = range.commonAncestorContainer.parentElement;
+
+    if (!element) return;
+
+    // Log for debugging
+    this.log('Selection started:', { text: text.slice(0, 50) + '...' });
+
+    // Only track new selections
+    if (!this.currentSelection || this.currentSelection.text !== text) {
+      this.currentSelection = {
+        startTime: Date.now(),
+        text,
+        element,
+      };
+    }
+  }
+
+  private handleSelectionEnd() {
+    if (!this.currentSelection) return;
+
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return;
+
+    const text = selection.toString().trim();
+    if (!text) return;
+
+    const duration = Date.now() - this.currentSelection.startTime;
+    // Only track selections that last more than 200ms to filter out accidental selections
+    if (duration < 200) return;
+
+    const element = this.currentSelection.element;
+    const selectionData = {
+      timestamp: new Date().toISOString(),
+      text: text.length > 200 ? `${text.slice(0, 200)}...` : text,
+      elementType: element.tagName.toLowerCase(),
+      elementPath: this.getElementPath(element),
+      selectionLength: text.length,
+      duration,
+      context: this.getSelectionContext(element),
+    };
+
+    // Add to metrics
+    this.metrics.interactions.textSelections.push(selectionData);
+
+    // Track the event
+    this.analytics.track('textSelection', {
+      ...selectionData,
+      metadata: {
+        pageUrl: window.location.href,
+        pageTitle: document.title,
+      },
+    });
+
+    this.log('Text selection tracked:', selectionData);
+    this.currentSelection = null;
+  }
+
+  private getElementPath(element: HTMLElement): string {
     const path: string[] = [];
     let current = element;
 
     while (current && current !== document.body) {
-      let identifier = current.id
-        ? `#${current.id}`
-        : current.tagName.toLowerCase();
-      if (!current.id && current.className) {
-        identifier += `.${current.className.split(' ').join('.')}`;
+      let selector = current.tagName.toLowerCase();
+      if (current.id) {
+        selector += `#${current.id}`;
+      } else if (current.className) {
+        selector += `.${current.className.split(' ').join('.')}`;
       }
-      path.unshift(identifier);
+      path.unshift(selector);
       current = current.parentElement as HTMLElement;
     }
 
-    return path;
+    return path.join(' > ');
   }
 
-  private calculateScrollPercentage(): number {
-    const windowHeight = window.innerHeight;
-    const documentHeight = document.documentElement.scrollHeight;
-    const scrollTop = window.scrollY;
-    return Math.round(((scrollTop + windowHeight) / documentHeight) * 100);
-  }
+  private getSelectionContext(element: HTMLElement): {
+    paragraph?: string;
+    nearestHeading?: string;
+  } {
+    const context: { paragraph?: string; nearestHeading?: string } = {};
 
-  private updateAttentionMetrics() {
-    const now = new Date().getTime();
-    let activeTime = 0;
-    let idleTime = 0;
-
-    this.data.attention.segments.forEach((segment) => {
-      const duration =
-        segment.type === 'active'
-          ? segment.duration || now - new Date(segment.startTime).getTime()
-          : segment.duration;
-
-      if (segment.type === 'active') {
-        activeTime += duration;
-      } else if (segment.type === 'idle') {
-        idleTime += duration;
+    // Get surrounding paragraph context
+    const paragraph = element.closest('p');
+    if (paragraph) {
+      const text = paragraph.textContent?.trim();
+      if (text) {
+        context.paragraph =
+          text.length > 100 ? `${text.slice(0, 100)}...` : text;
       }
-    });
+    }
 
-    this.data.attention.metrics.totalActiveTime = activeTime;
-    this.data.attention.metrics.totalIdleTime = idleTime;
-    this.data.attention.metrics.attentionScore =
-      (activeTime / (activeTime + idleTime)) * 100;
-  }
-
-  private trackInteraction(type: string, data: any) {
-    this.data.session.interactionCount++;
-    this.data.session.lastInteraction = new Date().toISOString();
-    this.data.session.duration =
-      new Date().getTime() - new Date(this.data.session.startTime).getTime();
-
-    this.analytics.track('engagement', {
-      type,
-      data,
-      session: this.data.session,
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  private getElementAttributes(element: HTMLElement): Record<string, string> {
-    const attributes: Record<string, string> = {};
-    Array.from(element.attributes).forEach((attr) => {
-      attributes[attr.name] = attr.value;
-    });
-    return attributes;
-  }
-
-  private getNearestSection(element: HTMLElement): string | undefined {
+    // Find nearest heading
     let current = element;
     while (current && current !== document.body) {
-      if (
-        current.tagName === 'SECTION' ||
-        current.hasAttribute('data-section')
-      ) {
-        return current.id || current.getAttribute('data-section') || undefined;
+      if (/^H[1-6]$/.test(current.tagName)) {
+        context.nearestHeading = current.textContent?.trim();
+        break;
       }
       current = current.parentElement as HTMLElement;
     }
-    return undefined;
-  }
 
-  private getNearestHeading(element: HTMLElement): string | undefined {
-    let current = element;
-    const headings = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6'];
-    while (current && current !== document.body) {
-      if (headings.includes(current.tagName)) {
-        return current.textContent?.trim() || undefined;
-      }
-      current = current.parentElement as HTMLElement;
-    }
-    return undefined;
-  }
-
-  private updateElementEngagement(elementId: string, type: string) {
-    if (!this.data.content.elements[elementId]) {
-      this.data.content.elements[elementId] = {
-        views: 0,
-        clicks: 0,
-        hovers: 0,
-        timeVisible: 0,
-      };
-    }
-    (this.data.content.elements[elementId] as any)[type]++;
-  }
-
-  private startHover(event: MouseEvent) {
-    const target = event.target as HTMLElement;
-    this.currentElement = target;
-    this.currentHover = {
-      element: target,
-      startTime: Date.now(),
-      position: {
-        path: [
-          {
-            x: event.pageX,
-            y: event.pageY,
-            t: 0,
-          },
-        ],
-      },
-      metadata: {
-        entryTime: new Date().toISOString(),
-      },
-    };
-  }
-
-  private endHover(event: MouseEvent) {
-    if (this.currentHover && this.currentElement) {
-      const duration = Date.now() - this.currentHover.startTime;
-      const hoverData = {
-        elementId: this.currentElement.id,
-        elementType: this.currentElement.tagName,
-        elementPath: this.getElementPath(this.currentElement),
-        duration,
-        intentScore: this.calculateIntentScore(this.currentHover.position.path),
-        interactions: {
-          clicks: 0,
-          scrolls: 0,
-          keyPresses: 0,
-        },
-        position: {
-          entryPoint: this.currentHover.position.path[0],
-          exitPoint: {
-            x: event.pageX,
-            y: event.pageY,
-            t: duration,
-          },
-          path: this.currentHover.position.path,
-        },
-        metadata: {
-          timestamp: new Date().toISOString(),
-          entryTime: this.currentHover.metadata.entryTime,
-          exitTime: new Date().toISOString(),
-        },
-      };
-
-      this.data.hover.push(hoverData);
-      this.trackInteraction('hover', hoverData);
-    }
-    this.currentElement = null;
-    this.currentHover = null;
-  }
-
-  private calculateIntentScore(
-    path: Array<{ x: number; y: number; t: number }>
-  ): number {
-    if (path.length < 2) return 0;
-
-    // Calculate based on movement pattern, speed, and directness
-    const totalDistance = path.reduce((acc, point, i) => {
-      if (i === 0) return 0;
-      const prev = path[i - 1];
-      return (
-        acc +
-        Math.sqrt(Math.pow(point.x - prev.x, 2) + Math.pow(point.y - prev.y, 2))
-      );
-    }, 0);
-
-    const directDistance = Math.sqrt(
-      Math.pow(path[path.length - 1].x - path[0].x, 2) +
-        Math.pow(path[path.length - 1].y - path[0].y, 2)
-    );
-
-    const timeSpent = path[path.length - 1].t - path[0].t;
-    const speed = totalDistance / timeSpent;
-    const directness = directDistance / totalDistance;
-
-    return Math.min(100, directness * 50 + speed * 50);
-  }
-
-  private startVisibilityTimer(elementId: string, ratio: number) {
-    this.visibilityTimers.set(elementId, Date.now());
-  }
-
-  private stopVisibilityTimer(elementId: string) {
-    const startTime = this.visibilityTimers.get(elementId);
-    if (startTime) {
-      const timeVisible = Date.now() - startTime;
-      if (this.data.content.elements[elementId]) {
-        this.data.content.elements[elementId].timeVisible += timeVisible;
-      }
-      this.visibilityTimers.delete(elementId);
-    }
-  }
-
-  private handleTouchStart(event: TouchEvent) {
-    const touch = event.touches[0];
-    this.data.attention.interactions.touch.tapCount++;
-
-    // Track initial touch position for swipe calculation
-    this.touchStartPosition = {
-      x: touch.pageX,
-      y: touch.pageY,
-      time: Date.now(),
-    };
-  }
-
-  private handleTouchMove(event: TouchEvent) {
-    if (!this.touchStartPosition) return;
-
-    const touch = event.touches[0];
-    const deltaX = touch.pageX - this.touchStartPosition.x;
-    const deltaY = touch.pageY - this.touchStartPosition.y;
-    const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-
-    this.data.attention.interactions.touch.swipeDistance += distance;
-    this.touchStartPosition.x = touch.pageX;
-    this.touchStartPosition.y = touch.pageY;
-  }
-
-  private handleTouchEnd(event: TouchEvent) {
-    if (event.touches.length === 2) {
-      // Detect pinch gesture end
-      this.data.attention.interactions.touch.pinchZooms++;
-    }
-    this.touchStartPosition = null;
-  }
-
-  cleanup() {
-    // Remove event listeners
-    window.removeEventListener('click', this.handleClick);
-    window.removeEventListener('scroll', this.handleScroll);
-    window.removeEventListener('mousemove', this.handleMouseMove);
-    document.removeEventListener(
-      'visibilitychange',
-      this.handleVisibilityChange
-    );
-    window.removeEventListener('keydown', this.handleKeyboard);
-    window.removeEventListener('touchstart', this.handleTouch);
-    window.removeEventListener('touchmove', this.handleTouch);
-    window.removeEventListener('touchend', this.handleTouch);
-
-    // Final tracking
-    this.updateAttentionMetrics();
-    this.analytics.track('engagementSummary', this.data);
+    return context;
   }
 }
