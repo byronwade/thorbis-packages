@@ -2,7 +2,6 @@ import Analytics from 'analytics';
 import type { AnalyticsConfig } from '../types';
 import { BaseTracker } from './trackers/base';
 
-// Define the Analytics configuration type
 interface AnalyticsInstanceConfig {
   app?: string;
   version?: string | number;
@@ -10,26 +9,47 @@ interface AnalyticsInstanceConfig {
   plugins?: Record<string, unknown>[];
 }
 
-// Debug plugin to log all analytics events
-const debugPlugin = {
-  name: 'debug-plugin',
-  page: ({ payload }: any) => {
-    console.log('📄 Page View:', payload);
-  },
-  track: ({ payload }: any) => {
-    console.log('🔍 Track Event:', payload);
-  },
-  identify: ({ payload }: any) => {
-    console.log('👤 Identify:', payload);
-  },
-};
+type ImportantEventType =
+  | 'page_view'
+  | 'session_start'
+  | 'session_end'
+  | 'user_interaction'
+  | 'error'
+  | 'conversion'
+  | 'performance';
+
+interface AnalyticsEvent {
+  type: string;
+  data: Record<string, any>;
+  timestamp: number;
+}
 
 export class ThorbisAnalytics {
   private config: AnalyticsConfig;
   private analytics: any;
-  private eventBuffer: any[] = [];
-  private readonly API_ENDPOINT = 'https://thorbis.com/api/events';
   private trackers: Map<string, BaseTracker> = new Map();
+  private eventQueue: AnalyticsEvent[] = [];
+  private flushTimeout: NodeJS.Timeout | null = null;
+  private readonly maxBatchSize: number;
+  private readonly flushInterval: number;
+  private analyticsEvents: AnalyticsEvent[] = [];
+  private startTime: number = Date.now();
+  private lastActivityTime: number = Date.now();
+  private isIdle: boolean = false;
+  private readonly IDLE_THRESHOLD = 30000; // 30 seconds
+  private webVitals: {
+    cls: number | null;
+    fid: number | null;
+    lcp: number | null;
+    fcp: number | null;
+    ttfb: number | null;
+  } = {
+    cls: null,
+    fid: null,
+    lcp: null,
+    fcp: null,
+    ttfb: null,
+  };
 
   constructor(config: AnalyticsConfig) {
     this.config = {
@@ -37,187 +57,303 @@ export class ThorbisAnalytics {
       debug: config.debug ?? true,
     };
 
-    // Initialize analytics with proper config type
+    // Initialize analytics with proper config type and custom handlers
     const analyticsConfig: AnalyticsInstanceConfig = {
       app: 'thorbis-analytics',
       version: process.env.NEXT_PUBLIC_VERSION || '1.0.0',
       debug: this.config.debug,
-      plugins: [debugPlugin],
+      plugins: [
+        {
+          name: 'thorbis-plugin',
+          page: ({ payload }: { payload?: any }) => {
+            if (this.analyticsEvents && payload?.properties) {
+              this.analyticsEvents.push({
+                type: 'page_view',
+                data: {
+                  url: payload.properties.url,
+                  referrer: payload.properties.referrer,
+                  title: document.title,
+                  timestamp: Date.now(),
+                },
+                timestamp: Date.now(),
+              });
+            }
+          },
+          track: ({ payload }: { payload?: any }) => {
+            if (
+              payload?.event &&
+              this.isImportantEvent(payload.event) &&
+              this.analyticsEvents
+            ) {
+              this.analyticsEvents.push({
+                type: payload.event,
+                data: {
+                  ...payload.properties,
+                  timestamp: Date.now(),
+                },
+                timestamp: Date.now(),
+              });
+            }
+          },
+        },
+      ],
     };
 
     this.analytics = Analytics(analyticsConfig);
+
+    // Default batch size of 10 events or flush every 5 seconds
+    this.maxBatchSize = config.batchConfig?.maxBatchSize || 10;
+    this.flushInterval = config.batchConfig?.flushInterval || 5000;
+
+    // Add event listeners for session end
+    if (typeof window !== 'undefined') {
+      this.setupEventListeners();
+    }
   }
 
-  async init() {
+  private setupEventListeners(): void {
+    // Use passive listeners for better performance
+    const options = { passive: true };
+
+    window.addEventListener('beforeunload', this.handleSessionEnd, options);
+    window.addEventListener(
+      'visibilitychange',
+      this.handleVisibilityChange,
+      options
+    );
+    window.addEventListener('pagehide', this.handleSessionEnd, options);
+
+    // Use requestIdleCallback for non-critical tasks
+    if ('requestIdleCallback' in window) {
+      window.requestIdleCallback(() => this.checkIdleState(), {
+        timeout: 1000,
+      });
+    } else {
+      setInterval(() => this.checkIdleState(), 1000);
+    }
+  }
+
+  private checkIdleState = (): void => {
+    const now = Date.now();
+    if (now - this.lastActivityTime > this.IDLE_THRESHOLD && !this.isIdle) {
+      this.isIdle = true;
+      this.analytics.track('userIdle', {
+        duration: now - this.lastActivityTime,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+
+  public async init(): Promise<void> {
     try {
-      console.group('🚀 Thorbis Analytics Initialization');
-      console.log('Starting initialization...');
+      if (!this.config.debug) return;
 
-      // Initialize SEO and Project trackers first and await their completion
-      if (this.config.options?.project) {
-        console.group('📊 Project Analysis');
-        const { ProjectTracker } = await import('./trackers/project');
-        const projectTracker = new ProjectTracker(this.analytics);
-        this.trackers.set('project', projectTracker);
-        await projectTracker.init();
-        console.groupEnd();
+      // Prevent multiple initializations
+      if (this.trackers.size > 0) {
+        console.warn('Analytics already initialized');
+        return;
       }
 
-      if (this.config.options?.seo) {
-        console.group('🔍 SEO Analysis');
-        const { SEOTracker } = await import('./trackers/seo');
-        const seoTracker = new SEOTracker(this.analytics);
-        this.trackers.set('seo', seoTracker);
-        await seoTracker.init();
-        console.groupEnd();
-      }
+      console.log('\n🚀 Initializing Thorbis Analytics\n');
 
-      // Initialize other trackers
-      const enabledTrackers: [string, BaseTracker][] = [];
+      // Initialize trackers using dynamic imports for better performance
+      await this.initializeTrackers();
 
-      if (this.config.options?.pageViews) {
-        const { PageViewTracker } = await import('./trackers/pageViews');
-        enabledTrackers.push(['pageView', new PageViewTracker(this.analytics)]);
-      }
-
-      if (this.config.options?.navigation) {
-        const { NavigationTracker } = await import('./trackers/navigation');
-        enabledTrackers.push([
-          'navigation',
-          new NavigationTracker(this.analytics),
-        ]);
-      }
-
-      if (this.config.options?.engagement) {
-        const { EngagementTracker } = await import('./trackers/engagement');
-        enabledTrackers.push([
-          'engagement',
-          new EngagementTracker(this.analytics),
-        ]);
-      }
-
-      if (this.config.options?.forms) {
-        const { FormsTracker } = await import('./trackers/forms');
-        enabledTrackers.push(['forms', new FormsTracker(this.analytics)]);
-      }
-
-      // Initialize remaining trackers sequentially
-      for (const [name, tracker] of enabledTrackers) {
-        this.trackers.set(name, tracker);
-        await tracker.init();
-      }
-
-      if (this.config.debug) {
-        console.group('📊 Active Trackers');
-        console.table(
-          Array.from(this.trackers.keys()).map((name) => ({
-            Tracker: name,
-            Status: 'Active',
-          }))
-        );
-        console.groupEnd();
-
-        console.group('⚙️ Configuration');
-        console.table(this.config);
-        console.groupEnd();
-      }
-
-      console.groupEnd(); // End Analytics Initialization
+      console.log(
+        '\n✅ Active Trackers:',
+        Array.from(this.trackers.keys()).join(', '),
+        '\n'
+      );
     } catch (error) {
       console.error('❌ Analytics initialization failed:', error);
       throw error;
     }
   }
 
-  // Use a more efficient event batching system
-  private batchedEvents = new Map<string, any[]>();
-  private batchTimeouts = new Map<string, NodeJS.Timeout>();
-  private readonly BATCH_DELAY = 1000; // 1 second
-
-  track(eventName: string, properties: any = {}, options: any = {}) {
-    const { userId, anonymousId } = this.getUserData();
-    const event = {
-      ...properties,
-      userId,
-      anonymousId,
-      timestamp: new Date().toISOString(),
-      context: {
-        page: {
-          url: window.location.href,
-          path: window.location.pathname,
-          title: document.title,
-          referrer: document.referrer,
-        },
-        ...options.context,
-      },
+  private async initializeTrackers(): Promise<void> {
+    const trackerModules = {
+      demographics: () =>
+        this.config.options?.demographics && import('./trackers/demographics'),
+      engagement: () =>
+        this.config.options?.engagement && import('./trackers/engagement'),
+      error: () => this.config.options?.error && import('./trackers/error'),
+      forms: () => this.config.options?.forms && import('./trackers/forms'),
+      media: () => this.config.options?.media && import('./trackers/media'),
+      navigation: () =>
+        this.config.options?.navigation && import('./trackers/navigation'),
+      pageViews: () =>
+        this.config.options?.pageViews && import('./trackers/pageViews'),
+      performance: () =>
+        this.config.options?.performance && import('./trackers/performance'),
+      project: () =>
+        this.config.options?.project && import('./trackers/project'),
+      search: () => this.config.options?.search && import('./trackers/search'),
+      session: () => true && import('./trackers/session'),
+      seo: () => this.config.options?.seo && import('./trackers/seo'),
     };
 
-    // Add to batch
-    const events = this.batchedEvents.get(eventName) || [];
-    events.push(event);
-    this.batchedEvents.set(eventName, events);
-
-    // Clear existing timeout
-    const existingTimeout = this.batchTimeouts.get(eventName);
-    if (existingTimeout) clearTimeout(existingTimeout);
-
-    // Set new timeout
-    this.batchTimeouts.set(
-      eventName,
-      setTimeout(() => this.flushEventBatch(eventName), this.BATCH_DELAY)
+    const initPromises = Object.entries(trackerModules).map(
+      async ([name, loader]) => {
+        try {
+          const shouldLoad = await loader();
+          if (shouldLoad) {
+            const module = await shouldLoad;
+            const TrackerClass = Object.values(module)[0];
+            const tracker = new TrackerClass(this.analytics);
+            this.trackers.set(name, tracker);
+            await tracker.init();
+            if (this.config.debug) {
+              console.log(`⚙️  Loaded ${name}`);
+            }
+          }
+        } catch (error) {
+          console.warn(`Failed to load ${name} tracker:`, error);
+        }
+      }
     );
+
+    await Promise.all(initPromises);
   }
 
-  private async flushEventBatch(eventName: string) {
-    const events = this.batchedEvents.get(eventName);
-    if (!events?.length) return;
+  private handleSessionEnd = async (event: Event): Promise<void> => {
+    const payload = await this.collectSessionData();
 
-    try {
-      await this.analytics.track(eventName, {
-        events,
-        count: events.length,
-        batchId: crypto.randomUUID(),
+    if (event.type === 'beforeunload') {
+      // Use sendBeacon for better reliability during page unload
+      const blob = new Blob([JSON.stringify(payload)], {
+        type: 'application/json',
       });
-      this.batchedEvents.delete(eventName);
-      this.batchTimeouts.delete(eventName);
+      navigator.sendBeacon('/api/events', blob);
+      return;
+    }
+
+    // For other cases, use fetch with keepalive
+    try {
+      await fetch('/api/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        keepalive: true,
+      });
+
+      if (this.config.debug) {
+        console.log('📊 Session ended:', {
+          sessionId: this.config.sessionId,
+          duration: payload.session.duration,
+          events: payload.session.events.length,
+        });
+      }
     } catch (error) {
-      console.error(`Failed to flush ${eventName} events:`, error);
+      console.error('Failed to send session data:', error);
     }
-  }
+  };
 
-  // Use a more memory-efficient cleanup
-  async cleanup() {
-    // Flush all batched events
-    await Promise.all(
-      Array.from(this.batchedEvents.keys()).map((eventName) =>
-        this.flushEventBatch(eventName)
-      )
-    );
-
-    // Cleanup trackers
-    for (const tracker of this.trackers.values()) {
-      tracker.cleanup();
+  private handleVisibilityChange = async (): Promise<void> => {
+    if (document.visibilityState === 'hidden') {
+      await this.handleSessionEnd(new Event('visibilitychange'));
     }
+  };
 
-    this.trackers.clear();
-    this.batchedEvents.clear();
-    this.batchTimeouts.clear();
-  }
-
-  private getUserData() {
-    const userId = localStorage.getItem('thorbis_user_id');
-    const anonymousId =
-      localStorage.getItem('thorbis_anonymous_id') || crypto.randomUUID();
-
-    if (!userId && anonymousId) {
-      localStorage.setItem('thorbis_anonymous_id', anonymousId);
-    }
+  private async collectSessionData(): Promise<any> {
+    const trackerData = await this.collectAllTrackerData();
 
     return {
-      userId: userId || null,
-      anonymousId,
+      sessionId: this.config.sessionId,
+      timestamp: Date.now(),
+      type: 'session_end',
+      metadata: this.getMetadata(),
+      session: {
+        id: this.config.sessionId,
+        startTime: this.startTime,
+        endTime: Date.now(),
+        duration: Date.now() - this.startTime,
+        events: this.analyticsEvents,
+        data: trackerData,
+      },
     };
+  }
+
+  private getMetadata(): Record<string, any> {
+    return {
+      url: window.location.href,
+      userAgent: navigator.userAgent,
+      screenSize: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      },
+      device: {
+        platform: navigator.platform,
+        language: navigator.language,
+        connection:
+          'connection' in navigator
+            ? {
+                type: (navigator as any).connection?.effectiveType,
+                downlink: (navigator as any).connection?.downlink,
+              }
+            : null,
+        screen: {
+          width: window.screen.width,
+          height: window.screen.height,
+          colorDepth: window.screen.colorDepth,
+          orientation: window.screen.orientation.type,
+        },
+      },
+    };
+  }
+
+  private async collectAllTrackerData(): Promise<Record<string, any>> {
+    const data: Record<string, any> = {};
+
+    for (const [name, tracker] of this.trackers) {
+      try {
+        data[name] = await Promise.resolve(tracker.getData());
+      } catch (error) {
+        console.warn(`Failed to collect data from ${name} tracker:`, error);
+        data[name] = null;
+      }
+    }
+
+    return data;
+  }
+
+  private isImportantEvent(eventType: string): boolean {
+    const importantEvents: ImportantEventType[] = [
+      'page_view',
+      'session_start',
+      'session_end',
+      'user_interaction',
+      'error',
+      'conversion',
+      'performance',
+    ];
+    return importantEvents.includes(eventType as ImportantEventType);
+  }
+
+  public cleanup(): void {
+    // Clear any pending timeouts
+    if (this.flushTimeout) {
+      clearTimeout(this.flushTimeout);
+    }
+
+    // Remove event listeners
+    window.removeEventListener('beforeunload', this.handleSessionEnd);
+    window.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    window.removeEventListener('pagehide', this.handleSessionEnd);
+
+    // Cleanup all trackers
+    this.trackers.forEach((tracker) => {
+      try {
+        tracker.cleanup();
+      } catch (error) {
+        console.warn('Error cleaning up tracker:', error);
+      }
+    });
+
+    // Clear all data
+    this.trackers.clear();
+    this.eventQueue = [];
+    this.analyticsEvents = [];
   }
 }
 
-export type { AnalyticsConfig } from '../types';
+export type { AnalyticsConfig };

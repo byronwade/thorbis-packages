@@ -2,15 +2,15 @@ import type { AnalyticsInstance } from 'analytics';
 
 export abstract class BaseTracker {
   protected analytics: any;
-  protected debug: boolean;
+  protected enabled: boolean;
 
-  constructor(analytics: any, debug: boolean = true) {
+  constructor(analytics: any, enabled: boolean = true) {
     this.analytics = analytics;
-    this.debug = debug;
+    this.enabled = enabled;
   }
 
   protected log(message: string, data?: any): void {
-    if (this.debug) {
+    if (this.enabled) {
       if (data) {
         console.group(`📊 ${message}`);
         console.log(data);
@@ -21,6 +21,7 @@ export abstract class BaseTracker {
     }
   }
 
-  abstract init(): void;
+  abstract init(): Promise<void>;
   abstract cleanup(): void;
+  abstract getData(): any;
 }

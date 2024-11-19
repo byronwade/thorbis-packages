@@ -5,8 +5,8 @@ interface NavigationMetrics {
     entryPage: string;
     exitPage?: string;
     pathLength: number;
-    uniquePages: number;
-    loops: number; // Number of times user visited same page
+    uniquePages: Set<string>;
+    loops: number;
     backButtonUsage: number;
     forwardButtonUsage: number;
     averageTimePerPage: number;
@@ -71,61 +71,30 @@ interface NavigationMetrics {
 
 export class NavigationTracker extends BaseTracker {
   private metrics: NavigationMetrics;
-  private currentPage: {
-    url: string;
-    startTime: number;
-    scrollDepth: number;
-    hasInteracted: boolean;
-  };
-  private pageHistory: Set<string>;
+  private pageStartTime: number = Date.now();
+  private lastPageUrl: string = '';
+  private navigationHistory: string[] = [];
+  private readonly MAX_HISTORY_LENGTH = 100;
   private readonly SLOW_PAGE_THRESHOLD = 3000; // 3 seconds
+  private observer: PerformanceObserver | null = null;
+  private readonly DEBOUNCE_TIME = 150; // ms
+  private debounceTimer: NodeJS.Timeout | null = null;
 
-  constructor(analytics: any, debug: boolean = false) {
-    super(analytics, debug);
+  constructor(analytics: any) {
+    super(analytics);
     this.metrics = this.initializeMetrics();
-    this.currentPage = {
-      url: '',
-      startTime: Date.now(),
-      scrollDepth: 0,
-      hasInteracted: false,
-    };
-    this.pageHistory = new Set();
-
-    // Bind methods
     this.handleNavigation = this.handleNavigation.bind(this);
     this.handlePopState = this.handlePopState.bind(this);
-    this.handleScroll = this.handleScroll.bind(this);
-    this.handleInteraction = this.handleInteraction.bind(this);
+    this.handleBeforeUnload = this.handleBeforeUnload.bind(this);
     this.handleVisibilityChange = this.handleVisibilityChange.bind(this);
-  }
-
-  init() {
-    if (typeof window === 'undefined') return;
-
-    // Track initial page load
-    this.handleInitialLoad();
-
-    // Set up navigation listeners
-    window.addEventListener('popstate', this.handlePopState);
-    window.addEventListener('scroll', this.handleScroll);
-    window.addEventListener('click', this.handleInteraction);
-    document.addEventListener('visibilitychange', this.handleVisibilityChange);
-
-    // Intercept history methods
-    this.interceptHistoryMethods();
-
-    // Track external links
-    this.trackExternalLinks();
-
-    this.log('Navigation tracker initialized');
   }
 
   private initializeMetrics(): NavigationMetrics {
     return {
       session: {
-        entryPage: window.location.href,
-        pathLength: 1,
-        uniquePages: 1,
+        entryPage: typeof window !== 'undefined' ? window.location.href : '',
+        pathLength: 0,
+        uniquePages: new Set([typeof window !== 'undefined' ? window.location.pathname : '']),
         loops: 0,
         backButtonUsage: 0,
         forwardButtonUsage: 0,
@@ -135,16 +104,7 @@ export class NavigationTracker extends BaseTracker {
       patterns: {
         commonFlows: [],
         exitPoints: [],
-        entryPoints: [
-          {
-            url: window.location.href,
-            entryCount: 1,
-            bounceRate: 0,
-            sources: {
-              [document.referrer || 'direct']: 1,
-            },
-          },
-        ],
+        entryPoints: [],
       },
       timing: {
         averagePageLoad: 0,
@@ -161,332 +121,407 @@ export class NavigationTracker extends BaseTracker {
     };
   }
 
-  private handleInitialLoad() {
-    const navigationTiming = performance.getEntriesByType(
-      'navigation'
-    )[0] as PerformanceNavigationTiming;
+  async init(): Promise<void> {
+    if (typeof window === 'undefined') return;
 
-    this.currentPage = {
-      url: window.location.href,
-      startTime: Date.now(),
-      scrollDepth: 0,
-      hasInteracted: false,
+    try {
+      // Track initial page load
+      this.trackInitialPage();
+
+      // Set up navigation tracking with passive listeners
+      this.setupNavigationTracking();
+
+      // Track performance metrics
+      this.setupPerformanceTracking();
+
+      this.log('Navigation tracker initialized');
+    } catch (error) {
+      console.warn('Error initializing navigation tracker:', error);
+    }
+  }
+
+  getData(): any {
+    return {
+      session: {
+        ...this.metrics.session,
+        uniquePages: Array.from(this.metrics.session.uniquePages),
+      },
+      path: this.metrics.path,
+      patterns: {
+        ...this.metrics.patterns,
+        commonFlows: this.analyzeNavigationPatterns(),
+        exitPoints: this.analyzeExitPoints(),
+        entryPoints: this.analyzeEntryPoints(),
+      },
+      timing: {
+        ...this.metrics.timing,
+        averagePageLoad: this.calculateAverageLoadTime(),
+        averageTransition: this.calculateAverageTransitionTime(),
+      },
+      summary: {
+        totalPages: this.metrics.session.uniquePages.size,
+        averageTimePerPage: this.calculateAverageTimePerPage(),
+        bounceRate: this.calculateBounceRate(),
+        exitRate: this.calculateExitRate(),
+        navigationEfficiency: this.calculateNavigationEfficiency(),
+      },
+    };
+  }
+
+  private setupNavigationTracking(): void {
+    // Use passive listeners for better performance
+    const options = { passive: true };
+
+    // Track history changes
+    window.addEventListener('popstate', this.handlePopState, options);
+    window.addEventListener('beforeunload', this.handleBeforeUnload, options);
+    document.addEventListener('visibilitychange', this.handleVisibilityChange, options);
+
+    // Track programmatic navigation
+    this.interceptHistoryMethods();
+    this.interceptLinkClicks();
+  }
+
+  private setupPerformanceTracking(): void {
+    if ('PerformanceObserver' in window) {
+      try {
+        this.observer = new PerformanceObserver((list) => {
+          const entries = list.getEntries();
+          entries.forEach((entry) => {
+            if (entry.entryType === 'navigation') {
+              this.updateNavigationTiming(entry as PerformanceNavigationTiming);
+            }
+          });
+        });
+
+        this.observer.observe({ entryTypes: ['navigation'] });
+      } catch (error) {
+        console.warn('PerformanceObserver not supported:', error);
+      }
+    }
+  }
+
+  private interceptHistoryMethods(): void {
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+
+    history.pushState = (...args) => {
+      originalPushState.apply(history, args);
+      this.handleNavigation('pushState');
     };
 
-    this.pageHistory.add(window.location.href);
+    history.replaceState = (...args) => {
+      originalReplaceState.apply(history, args);
+      this.handleNavigation('replaceState');
+    };
+  }
 
-    const pathEntry = {
+  private interceptLinkClicks(): void {
+    document.addEventListener('click', (event) => {
+      const link = (event.target as HTMLElement).closest('a');
+      if (!link) return;
+
+      const href = link.getAttribute('href');
+      if (!href) return;
+
+      const isExternal = href.startsWith('http') && !href.includes(window.location.hostname);
+      if (isExternal) {
+        this.trackExternalNavigation(href);
+      }
+    }, { passive: true });
+  }
+
+  private handleNavigation(method: string): void {
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+
+    this.debounceTimer = setTimeout(() => {
+      const currentUrl = window.location.href;
+      if (currentUrl === this.lastPageUrl) return;
+
+      this.trackPageTransition(method);
+      this.lastPageUrl = currentUrl;
+    }, this.DEBOUNCE_TIME);
+  }
+
+  private handlePopState = (): void => {
+    this.metrics.session.backButtonUsage++;
+    this.handleNavigation('popstate');
+  };
+
+  private handleBeforeUnload = (): void => {
+    this.trackPageExit('close');
+  };
+
+  private handleVisibilityChange = (): void => {
+    if (document.visibilityState === 'hidden') {
+      this.trackPageExit('background');
+    }
+  };
+
+  private trackInitialPage(): void {
+    const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
+    
+    this.metrics.path.push({
       url: window.location.href,
       title: document.title,
       timestamp: new Date().toISOString(),
       referrer: document.referrer,
-      type: 'initial' as const,
-      method: 'load' as const,
+      type: 'initial',
+      method: 'load',
       performance: {
-        loadTime: navigationTiming.loadEventEnd - navigationTiming.startTime,
+        loadTime: navigation ? navigation.loadEventEnd - navigation.startTime : 0,
         transitionTime: 0,
-        renderTime:
-          navigationTiming.domContentLoadedEventEnd -
-          navigationTiming.startTime,
+        renderTime: navigation ? navigation.domComplete - navigation.startTime : 0,
       },
       context: {
         previousPage: document.referrer,
         timeOnPage: 0,
         scrollDepth: 0,
       },
-    };
+    });
 
-    this.metrics.path.push(pathEntry);
-    this.updateTimingMetrics(pathEntry.performance);
-    this.trackNavigation('initialLoad', pathEntry);
+    this.lastPageUrl = window.location.href;
+    this.navigationHistory.push(window.location.pathname);
   }
 
-  private interceptHistoryMethods() {
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-    const self = this;
+  private trackPageTransition(method: string): void {
+    const currentTime = Date.now();
+    const timeOnPreviousPage = currentTime - this.pageStartTime;
 
-    history.pushState = function (...args) {
-      originalPushState.apply(this, args);
-      self.handleNavigation('pushState');
-    };
-
-    history.replaceState = function (...args) {
-      originalReplaceState.apply(this, args);
-      self.handleNavigation('replaceState');
-    };
-  }
-
-  private handlePopState() {
-    const isBackNavigation =
-      this.metrics.path.length > 1 &&
-      this.metrics.path[this.metrics.path.length - 2].url ===
-        window.location.href;
-
-    if (isBackNavigation) {
-      this.metrics.session.backButtonUsage++;
-      this.handleNavigation('popstate', 'back');
-    } else {
-      this.metrics.session.forwardButtonUsage++;
-      this.handleNavigation('popstate', 'forward');
-    }
-  }
-
-  private handleNavigation(method: string, type: string = 'navigation') {
-    const previousPage = this.currentPage;
-    const currentUrl = window.location.href;
-    const timestamp = new Date().toISOString();
-
-    // Update current page metrics before changing
-    this.updateCurrentPageMetrics();
-
-    // Create new navigation entry
-    const navigationEntry = {
-      url: currentUrl,
+    this.metrics.path.push({
+      url: window.location.href,
       title: document.title,
-      timestamp,
-      referrer: previousPage.url,
-      type: type as
-        | 'initial'
-        | 'navigation'
-        | 'back'
-        | 'forward'
-        | 'reload'
-        | 'external',
-      method: method as
-        | 'pushState'
-        | 'replaceState'
-        | 'popstate'
-        | 'load'
-        | 'redirect',
+      timestamp: new Date().toISOString(),
+      referrer: this.lastPageUrl,
+      type: this.determineNavigationType(method),
+      method: method as any,
       performance: {
-        loadTime: 0,
-        transitionTime: Date.now() - previousPage.startTime,
-        renderTime: 0,
+        loadTime: 0, // Will be updated by PerformanceObserver
+        transitionTime: performance.now(),
+        renderTime: 0, // Will be updated by PerformanceObserver
       },
       context: {
-        previousPage: previousPage.url,
-        timeOnPage: 0,
-        scrollDepth: previousPage.scrollDepth,
-        exitTrigger: type === 'back' ? ('back' as const) : ('link' as const),
+        previousPage: this.lastPageUrl,
+        timeOnPage: timeOnPreviousPage,
+        scrollDepth: this.calculateScrollDepth(),
       },
-    };
+    });
 
-    // Update session metrics
+    this.metrics.session.uniquePages.add(window.location.pathname);
     this.metrics.session.pathLength++;
-    if (!this.pageHistory.has(currentUrl)) {
-      this.metrics.session.uniquePages++;
-      this.pageHistory.add(currentUrl);
-    } else {
-      this.metrics.session.loops++;
+    this.pageStartTime = currentTime;
+
+    // Update navigation history
+    this.navigationHistory.push(window.location.pathname);
+    if (this.navigationHistory.length > this.MAX_HISTORY_LENGTH) {
+      this.navigationHistory.shift();
     }
 
-    // Update current page tracking
-    this.currentPage = {
-      url: currentUrl,
-      startTime: Date.now(),
-      scrollDepth: 0,
-      hasInteracted: false,
+    // Check for navigation loops
+    this.detectNavigationLoops();
+  }
+
+  private trackPageExit(trigger: 'link' | 'back' | 'close' | 'external' | 'reload'): void {
+    const lastPath = this.metrics.path[this.metrics.path.length - 1];
+    if (lastPath) {
+      lastPath.context.exitTrigger = trigger;
+      lastPath.context.timeOnPage = Date.now() - this.pageStartTime;
+      lastPath.context.scrollDepth = this.calculateScrollDepth();
+    }
+
+    this.metrics.session.exitPage = window.location.href;
+  }
+
+  private trackExternalNavigation(url: string): void {
+    this.analytics.track('externalNavigation', {
+      from: window.location.href,
+      to: url,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  private updateNavigationTiming(entry: PerformanceNavigationTiming): void {
+    this.metrics.timing.navigationTiming = {
+      dns: entry.domainLookupEnd - entry.domainLookupStart,
+      tcp: entry.connectEnd - entry.connectStart,
+      ttfb: entry.responseStart - entry.requestStart,
+      domLoad: entry.domContentLoadedEventEnd - entry.startTime,
+      windowLoad: entry.loadEventEnd - entry.startTime,
     };
 
-    // Add to path history
-    this.metrics.path.push(navigationEntry);
-
-    // Update patterns
-    this.updateNavigationPatterns();
-
-    // Track the navigation event
-    this.trackNavigation('navigation', navigationEntry);
-  }
-
-  private updateCurrentPageMetrics() {
-    const timeOnPage = Date.now() - this.currentPage.startTime;
-    const lastPathEntry = this.metrics.path[this.metrics.path.length - 1];
-
-    if (lastPathEntry) {
-      lastPathEntry.context.timeOnPage = timeOnPage;
-      lastPathEntry.context.scrollDepth = this.currentPage.scrollDepth;
+    // Update the last navigation entry with actual performance data
+    const lastPath = this.metrics.path[this.metrics.path.length - 1];
+    if (lastPath) {
+      lastPath.performance.loadTime = entry.loadEventEnd - entry.startTime;
+      lastPath.performance.renderTime = entry.domComplete - entry.startTime;
     }
 
-    // Update average time per page
-    const totalTime = this.metrics.path.reduce(
-      (sum, entry) => sum + entry.context.timeOnPage,
-      0
-    );
-    this.metrics.session.averageTimePerPage =
-      totalTime / this.metrics.path.length;
-  }
-
-  private updateNavigationPatterns() {
-    // Update common flows
-    if (this.metrics.path.length >= 3) {
-      const flow = this.metrics.path.slice(-3).map((entry) => entry.url);
-      const existingFlow = this.metrics.patterns.commonFlows.find(
-        (pattern) => JSON.stringify(pattern.path) === JSON.stringify(flow)
-      );
-
-      if (existingFlow) {
-        existingFlow.frequency++;
-        existingFlow.averageTime =
-          (existingFlow.averageTime +
-            this.metrics.path[this.metrics.path.length - 2].context
-              .timeOnPage) /
-          2;
-      } else {
-        this.metrics.patterns.commonFlows.push({
-          path: flow,
-          frequency: 1,
-          averageTime:
-            this.metrics.path[this.metrics.path.length - 2].context.timeOnPage,
-          conversionRate: 0, // To be calculated based on goals
-        });
-      }
-    }
-
-    // Update exit points
-    const previousPage = this.metrics.path[this.metrics.path.length - 2];
-    if (previousPage) {
-      const existingExit = this.metrics.patterns.exitPoints.find(
-        (exit) => exit.url === previousPage.url
-      );
-      if (existingExit) {
-        existingExit.exitCount++;
-        existingExit.averageTimeBeforeExit =
-          (existingExit.averageTimeBeforeExit +
-            previousPage.context.timeOnPage) /
-          2;
-        existingExit.exitReasons[
-          previousPage.context.exitTrigger || 'unknown'
-        ] =
-          (existingExit.exitReasons[
-            previousPage.context.exitTrigger || 'unknown'
-          ] || 0) + 1;
-      } else {
-        this.metrics.patterns.exitPoints.push({
-          url: previousPage.url,
-          exitCount: 1,
-          averageTimeBeforeExit: previousPage.context.timeOnPage,
-          exitReasons: {
-            [previousPage.context.exitTrigger || 'unknown']: 1,
-          },
-        });
-      }
-    }
-  }
-
-  private updateTimingMetrics(performance: {
-    loadTime: number;
-    transitionTime: number;
-    renderTime: number;
-  }) {
-    // Update averages
-    const pathLength = this.metrics.path.length;
-    this.metrics.timing.averagePageLoad =
-      (this.metrics.timing.averagePageLoad * (pathLength - 1) +
-        performance.loadTime) /
-      pathLength;
-    this.metrics.timing.averageTransition =
-      (this.metrics.timing.averageTransition * (pathLength - 1) +
-        performance.transitionTime) /
-      pathLength;
-
-    // Update slowest pages
-    if (performance.loadTime > this.SLOW_PAGE_THRESHOLD) {
+    // Track slow pages
+    if (entry.loadEventEnd - entry.startTime > this.SLOW_PAGE_THRESHOLD) {
       this.metrics.timing.slowestPages.push({
         url: window.location.href,
-        loadTime: performance.loadTime,
+        loadTime: entry.loadEventEnd - entry.startTime,
         timestamp: new Date().toISOString(),
       });
-      // Keep only top 5 slowest pages
-      this.metrics.timing.slowestPages.sort((a, b) => b.loadTime - a.loadTime);
-      this.metrics.timing.slowestPages = this.metrics.timing.slowestPages.slice(
-        0,
-        5
-      );
     }
   }
 
-  private handleScroll = () => {
-    const scrollDepth =
-      ((window.scrollY + window.innerHeight) /
-        document.documentElement.scrollHeight) *
-      100;
-    this.currentPage.scrollDepth = Math.max(
-      this.currentPage.scrollDepth,
-      Math.round(scrollDepth)
-    );
-  };
+  private determineNavigationType(method: string): NavigationMetrics['path'][0]['type'] {
+    if (method === 'popstate') return 'back';
+    if (method === 'pushState') return 'navigation';
+    if (method === 'replaceState') return 'navigation';
+    if (method === 'load') return 'initial';
+    return 'navigation';
+  }
 
-  private handleInteraction = () => {
-    this.currentPage.hasInteracted = true;
-  };
+  private calculateScrollDepth(): number {
+    const windowHeight = window.innerHeight;
+    const documentHeight = document.documentElement.scrollHeight;
+    const scrollTop = window.scrollY;
+    return Math.round(((scrollTop + windowHeight) / documentHeight) * 100);
+  }
 
-  private handleVisibilityChange = () => {
-    if (document.hidden) {
-      this.updateCurrentPageMetrics();
+  private detectNavigationLoops(): void {
+    const pathStr = this.navigationHistory.join(',');
+    const matches = pathStr.match(/(.+?)\1+/g);
+    if (matches) {
+      this.metrics.session.loops += matches.length;
     }
-  };
+  }
 
-  private trackExternalLinks() {
-    document.addEventListener('click', (event) => {
-      const target = event.target as HTMLElement;
-      const link = target.closest('a');
+  private analyzeNavigationPatterns(): NavigationMetrics['patterns']['commonFlows'] {
+    const flows: Map<string, { count: number; times: number[] }> = new Map();
+    const pathLength = 3; // Look for patterns of 3 pages
 
-      if (link && link.hostname !== window.location.hostname) {
-        this.trackNavigation('externalNavigation', {
-          url: link.href,
-          title: link.title || link.textContent || 'External Link',
-          timestamp: new Date().toISOString(),
-          type: 'external',
-          method: 'link',
-          referrer: window.location.href,
-          performance: {
-            loadTime: 0,
-            transitionTime: Date.now() - this.currentPage.startTime,
-            renderTime: 0,
-          },
-          context: {
-            previousPage: window.location.href,
-            timeOnPage: Date.now() - this.currentPage.startTime,
-            scrollDepth: this.currentPage.scrollDepth,
-            exitTrigger: 'external',
-          },
-        });
+    for (let i = 0; i <= this.navigationHistory.length - pathLength; i++) {
+      const path = this.navigationHistory.slice(i, i + pathLength);
+      const pathKey = path.join(',');
+      
+      const existing = flows.get(pathKey) || { count: 0, times: [] };
+      existing.count++;
+      flows.set(pathKey, existing);
+    }
+
+    return Array.from(flows.entries())
+      .map(([path, data]) => ({
+        path: path.split(','),
+        frequency: data.count,
+        averageTime: data.times.reduce((a, b) => a + b, 0) / data.times.length,
+        conversionRate: 0, // Would need conversion goals to calculate
+      }))
+      .sort((a, b) => b.frequency - a.frequency)
+      .slice(0, 5);
+  }
+
+  private analyzeExitPoints(): NavigationMetrics['patterns']['exitPoints'] {
+    const exitPoints = new Map<string, { count: number; times: number[]; reasons: Record<string, number> }>();
+
+    this.metrics.path.forEach((path) => {
+      if (path.context.exitTrigger) {
+        const existing = exitPoints.get(path.url) || { count: 0, times: [], reasons: {} };
+        existing.count++;
+        existing.times.push(path.context.timeOnPage);
+        existing.reasons[path.context.exitTrigger] = (existing.reasons[path.context.exitTrigger] || 0) + 1;
+        exitPoints.set(path.url, existing);
       }
     });
+
+    return Array.from(exitPoints.entries())
+      .map(([url, data]) => ({
+        url,
+        exitCount: data.count,
+        averageTimeBeforeExit: data.times.reduce((a, b) => a + b, 0) / data.times.length,
+        exitReasons: data.reasons,
+      }))
+      .sort((a, b) => b.exitCount - a.exitCount);
   }
 
-  private trackNavigation(eventName: string, data: any) {
-    this.analytics.track(eventName, {
-      ...data,
-      sessionMetrics: this.metrics.session,
-      patterns: this.metrics.patterns,
-      timing: this.metrics.timing,
+  private analyzeEntryPoints(): NavigationMetrics['patterns']['entryPoints'] {
+    const entryPoints = new Map<string, { count: number; bounces: number; sources: Record<string, number> }>();
+
+    this.metrics.path.forEach((path, index) => {
+      if (path.type === 'initial' || !this.metrics.path[index - 1]) {
+        const existing = entryPoints.get(path.url) || { count: 0, bounces: 0, sources: {} };
+        existing.count++;
+        
+        // Count as bounce if it's the only page viewed
+        if (this.metrics.path.length === 1) {
+          existing.bounces++;
+        }
+
+        const source = new URL(path.referrer || 'direct').hostname || 'direct';
+        existing.sources[source] = (existing.sources[source] || 0) + 1;
+        
+        entryPoints.set(path.url, existing);
+      }
     });
+
+    return Array.from(entryPoints.entries())
+      .map(([url, data]) => ({
+        url,
+        entryCount: data.count,
+        bounceRate: (data.bounces / data.count) * 100,
+        sources: data.sources,
+      }))
+      .sort((a, b) => b.entryCount - a.entryCount);
   }
 
-  cleanup() {
-    // Update final metrics
-    this.updateCurrentPageMetrics();
+  private calculateAverageLoadTime(): number {
+    const loadTimes = this.metrics.path
+      .map(p => p.performance.loadTime)
+      .filter(time => time > 0);
+    return loadTimes.length ? loadTimes.reduce((a, b) => a + b, 0) / loadTimes.length : 0;
+  }
 
-    // Set exit page
-    this.metrics.session.exitPage = this.currentPage.url;
+  private calculateAverageTransitionTime(): number {
+    const transitionTimes = this.metrics.path
+      .map(p => p.performance.transitionTime)
+      .filter(time => time > 0);
+    return transitionTimes.length ? transitionTimes.reduce((a, b) => a + b, 0) / transitionTimes.length : 0;
+  }
 
-    // Track final navigation state
-    this.trackNavigation('navigationEnd', {
-      sessionMetrics: this.metrics.session,
-      finalPath: this.metrics.path,
-      patterns: this.metrics.patterns,
-      timing: this.metrics.timing,
-    });
+  private calculateAverageTimePerPage(): number {
+    const timesOnPage = this.metrics.path
+      .map(p => p.context.timeOnPage)
+      .filter(time => time > 0);
+    return timesOnPage.length ? timesOnPage.reduce((a, b) => a + b, 0) / timesOnPage.length : 0;
+  }
 
-    // Remove event listeners
+  private calculateBounceRate(): number {
+    const singlePageSessions = this.metrics.path.length === 1 ? 1 : 0;
+    return (singlePageSessions / this.metrics.path.length) * 100;
+  }
+
+  private calculateExitRate(): number {
+    const exits = this.metrics.path.filter(p => p.context.exitTrigger).length;
+    return (exits / this.metrics.path.length) * 100;
+  }
+
+  private calculateNavigationEfficiency(): number {
+    const uniquePages = this.metrics.session.uniquePages.size;
+    const totalNavigations = this.metrics.session.pathLength;
+    return uniquePages ? (uniquePages / totalNavigations) * 100 : 0;
+  }
+
+  cleanup(): void {
     window.removeEventListener('popstate', this.handlePopState);
-    window.removeEventListener('scroll', this.handleScroll);
-    window.removeEventListener('click', this.handleInteraction);
-    document.removeEventListener(
-      'visibilitychange',
-      this.handleVisibilityChange
-    );
+    window.removeEventListener('beforeunload', this.handleBeforeUnload);
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    
+    if (this.observer) {
+      this.observer.disconnect();
+    }
+    
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+    }
+
+    // Restore original history methods
+    if (history.pushState.toString().includes('handleNavigation')) {
+      delete (history as any).pushState;
+    }
+    if (history.replaceState.toString().includes('handleNavigation')) {
+      delete (history as any).replaceState;
+    }
   }
 }

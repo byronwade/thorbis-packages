@@ -19,6 +19,18 @@ export const Thorbis = () => {
             navigation: true,
             engagement: true,
             forms: true,
+            heatmaps: true,
+            seo: true,
+            project: true,
+            performance: true,
+            demographics: true,
+            error: true,
+            media: true,
+            search: true,
+          },
+          batchConfig: {
+            maxBatchSize: 10,
+            flushInterval: 5000,
           },
         });
 

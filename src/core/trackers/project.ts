@@ -1,444 +1,457 @@
 import { BaseTracker } from './base';
 
-interface PackageInfo {
-  name: string;
-  version: string;
-  description?: string;
-  author?: string;
-  license?: string;
-  dependencies: Record<string, string>;
-  devDependencies: Record<string, string>;
-  scripts: Record<string, string>;
-}
-
-interface FrameworkInfo {
-  name: string;
-  version: string;
-  type: 'react' | 'next' | 'vue' | 'angular' | 'svelte' | 'other';
-  features: string[];
-}
-
 interface ProjectMetrics {
-  framework: FrameworkInfo;
-  package: PackageInfo;
-  environment: {
-    nodeVersion: string;
-    npmVersion: string;
-    platform: string;
-    arch: string;
+  framework: {
+    name: string;
+    version: string;
+    type: string;
+    features: string[];
   };
-  build: {
-    bundler: string;
-    transpiler: string;
-    cssProcessor?: string;
-    optimization: {
-      treeshaking: boolean;
-      minification: boolean;
-      splitting: boolean;
-    };
+  buildTools: {
+    bundler?: string;
+    transpiler?: string;
+    packageManager?: string;
   };
   dependencies: {
-    total: number;
-    direct: number;
-    dev: number;
-    types: number;
-    outdated: number;
-    security: {
-      high: number;
-      medium: number;
-      low: number;
-    };
+    ui: string[];
+    state: string[];
+    routing: string[];
+    styling: string[];
+    testing: string[];
   };
   features: {
-    typescript: boolean;
-    testing: boolean;
-    storybook: boolean;
-    i18n: boolean;
-    pwa: boolean;
-    ssg: boolean;
     ssr: boolean;
-    analytics: boolean;
-    seo: boolean;
-  };
-  performance: {
-    buildTime: number;
-    bundleSize: {
-      total: number;
-      js: number;
-      css: number;
-      assets: number;
+    pwa: boolean;
+    webgl: boolean;
+    localStorage: boolean;
+    serviceWorker: boolean;
+    api: {
+      rest: boolean;
+      graphql: boolean;
+      websocket: boolean;
     };
-    treeshakability: number;
+  };
+  environment: {
+    userAgent: string;
+    platform: string;
+    language: string;
+    screenResolution: {
+      width: number;
+      height: number;
+    };
+    viewport: {
+      width: number;
+      height: number;
+    };
+    connection: any;
+  };
+  repository: {
+    type: 'monorepo' | 'polyrepo' | 'unknown';
+    manager?: 'turbo' | 'nx' | 'lerna' | 'yarn-workspaces' | 'pnpm-workspaces';
+    details?: {
+      workspaces?: string[];
+      packages?: number;
+      hasRoot?: boolean;
+      config?: any;
+    };
+  };
+  buildSystem: {
+    type: string;
+    config?: any;
+    features: string[];
+    dependencies?: string[];
+    scripts?: Record<string, string>;
   };
 }
 
 export class ProjectTracker extends BaseTracker {
   private metrics: ProjectMetrics;
+  private readonly FRAMEWORK_PATTERNS = {
+    next: {
+      name: 'Next.js',
+      type: 'meta-framework',
+      features: ['ssr', 'app-router', 'api-routes', 'react'],
+      detect: () =>
+        !!(
+          (window as any).__NEXT_DATA__ ||
+          document.getElementById('__next') ||
+          document.querySelector('[data-nextjs-page]') ||
+          document.querySelector('script[src*="/_next/"]')
+        ),
+    },
+    react: {
+      name: 'React',
+      type: 'library',
+      features: ['components', 'virtual-dom'],
+      detect: () =>
+        !!(
+          (window as any).React ||
+          document.querySelector('[data-reactroot]') ||
+          document.querySelector('[data-react-helmet]')
+        ),
+    },
+    vue: {
+      name: 'Vue',
+      type: 'framework',
+      features: ['components', 'reactivity'],
+      detect: () =>
+        !!(
+          (window as any).__VUE__ ||
+          document.querySelector('[data-v-]') ||
+          document.querySelector('#__nuxt')
+        ),
+    },
+    angular: {
+      name: 'Angular',
+      type: 'framework',
+      features: ['components', 'dependency-injection'],
+      detect: () =>
+        !!(document.querySelector('[ng-version]') || (window as any).ng),
+    },
+    svelte: {
+      name: 'Svelte',
+      type: 'framework',
+      features: ['components', 'reactivity'],
+      detect: () => !!document.querySelector('style[data-svelte]'),
+    },
+  };
 
   constructor(analytics: any) {
-    super(analytics, true);
+    super(analytics);
     this.metrics = this.initializeMetrics();
   }
 
   async init(): Promise<void> {
+    if (typeof window === 'undefined') return;
+
     try {
-      console.group('🔧 Project Analysis');
-      console.log('Starting project analysis...');
+      // Use requestIdleCallback for non-critical detection
+      if ('requestIdleCallback' in window) {
+        window.requestIdleCallback(() => this.detectFrameworkAndFeatures(), {
+          timeout: 2000,
+        });
+      } else {
+        this.detectFrameworkAndFeatures();
+      }
 
-      await this.analyzeProject();
-
-      // Force immediate analysis and logging
-      const packageJson = await this.getPackageJson();
-
-      console.group('📦 Package Info');
-      console.table({
-        Name: packageJson.name || 'N/A',
-        Version: packageJson.version || 'N/A',
-        Description: packageJson.description || 'N/A',
-        Author: packageJson.author || 'N/A',
-        License: packageJson.license || 'N/A',
-      });
-      console.groupEnd();
-
-      console.group('🛠 Framework Details');
-      console.table({
-        Name: this.metrics.framework.name || 'N/A',
-        Version: this.metrics.framework.version || 'N/A',
-        Type: this.metrics.framework.type || 'N/A',
-        Features: this.metrics.framework.features.join(', ') || 'N/A',
-      });
-      console.groupEnd();
-
-      console.group('📚 Dependencies');
-      console.table({
-        'Total Dependencies': this.metrics.dependencies.total,
-        'Direct Dependencies': this.metrics.dependencies.direct,
-        'Dev Dependencies': this.metrics.dependencies.dev,
-        'Type Definitions': this.metrics.dependencies.types,
-      });
-      console.groupEnd();
-
-      console.group('🏗 Build Configuration');
-      console.table({
-        Bundler: this.metrics.build.bundler || 'N/A',
-        Transpiler: this.metrics.build.transpiler || 'N/A',
-        'CSS Processor': this.metrics.build.cssProcessor || 'N/A',
-      });
-      console.groupEnd();
-
-      console.group('✨ Features');
-      console.table(
-        Object.entries(this.metrics.features).map(([feature, enabled]) => ({
-          Feature: feature,
-          Status: enabled ? '✅ Enabled' : '❌ Disabled',
-        }))
-      );
-      console.groupEnd();
-
-      // Track the complete metrics
-      this.analytics.track('projectMetrics', {
-        ...this.metrics,
-        timestamp: new Date().toISOString(),
-      });
-
-      console.groupEnd(); // End Project Analysis
+      this.log('Project tracker initialized');
     } catch (error) {
-      console.error('❌ Error analyzing project:', error);
+      console.warn('Error initializing project tracker:', error);
     }
   }
 
-  private async analyzeProject(): Promise<void> {
-    try {
-      // Analyze package.json
-      const packageJson = await this.getPackageJson();
-      this.metrics.package = this.analyzePackageJson(packageJson);
-
-      // Detect framework
-      this.metrics.framework = this.detectFramework(packageJson);
-
-      // Analyze dependencies
-      this.metrics.dependencies = this.analyzeDependencies(packageJson);
-
-      // Detect features
-      this.metrics.features = this.detectFeatures(packageJson);
-
-      // Analyze build configuration
-      this.metrics.build = this.analyzeBuildConfig(packageJson);
-
-      // Get environment info
-      this.metrics.environment = this.getEnvironmentInfo();
-
-      // Analyze performance metrics
-      this.metrics.performance = await this.analyzePerformance();
-
-      // Log the analysis results
-      this.logAnalysisResults();
-    } catch (error) {
-      console.error('Error in project analysis:', error);
-      throw error;
-    }
-  }
-
-  private logAnalysisResults(): void {
-    console.group('📊 Project Analysis Results');
-
-    console.group('📦 Package Info');
-    console.table(this.metrics.package);
-    console.groupEnd();
-
-    console.group('🛠 Framework Details');
-    console.table(this.metrics.framework);
-    console.groupEnd();
-
-    console.group('📚 Dependencies');
-    console.table(this.metrics.dependencies);
-    console.groupEnd();
-
-    console.group('⚡ Performance');
-    console.table(this.metrics.performance);
-    console.groupEnd();
-
-    console.group('✨ Features');
-    console.table(
-      Object.entries(this.metrics.features).map(([feature, enabled]) => ({
-        Feature: feature,
-        Status: enabled ? '✅ Enabled' : '❌ Disabled',
-      }))
-    );
-    console.groupEnd();
-
-    console.groupEnd(); // End Project Analysis Results
-  }
-
-  private async getPackageJson(): Promise<any> {
-    try {
-      return await import('../../../package.json');
-    } catch (error) {
-      this.log('Error loading package.json:', error);
-      return {};
-    }
-  }
-
-  private analyzePackageJson(packageJson: any): PackageInfo {
+  getData(): any {
     return {
-      name: packageJson.name || '',
-      version: packageJson.version || '',
-      description: packageJson.description,
-      author: packageJson.author,
-      license: packageJson.license,
-      dependencies: packageJson.dependencies || {},
-      devDependencies: packageJson.devDependencies || {},
-      scripts: packageJson.scripts || {},
+      ...this.metrics,
+      summary: {
+        framework: `${this.metrics.framework.name} ${this.metrics.framework.version}`,
+        buildTools: Object.values(this.metrics.buildTools)
+          .filter(Boolean)
+          .join(', '),
+        mainFeatures: this.getMainFeatures(),
+        environment: this.getEnvironmentSummary(),
+      },
     };
   }
 
-  private detectFramework(packageJson: any): FrameworkInfo {
-    const deps = {
-      ...packageJson.dependencies,
-      ...packageJson.devDependencies,
+  private detectFrameworkAndFeatures(): void {
+    // Detect framework
+    this.metrics.framework = this.detectFramework();
+
+    // Detect build tools
+    this.metrics.buildTools = this.detectBuildTools();
+
+    // Detect dependencies
+    this.metrics.dependencies = this.detectDependencies();
+
+    // Detect features
+    this.metrics.features = this.detectFeatures();
+
+    // Detect repository type
+    this.metrics.repository = this.detectRepository();
+
+    // Detect build system
+    this.metrics.buildSystem = this.detectBuildSystem();
+
+    // Track in analytics
+    this.analytics.track('projectDetection', {
+      framework: this.metrics.framework,
+      buildTools: this.metrics.buildTools,
+      features: this.metrics.features,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  private detectFramework(): ProjectMetrics['framework'] {
+    // Check for frameworks in order of specificity
+    for (const [key, pattern] of Object.entries(this.FRAMEWORK_PATTERNS)) {
+      if (pattern.detect()) {
+        return {
+          name: pattern.name,
+          version: this.getFrameworkVersion(key),
+          type: pattern.type,
+          features: pattern.features,
+        };
+      }
+    }
+
+    return {
+      name: 'Unknown',
+      version: '0.0.0',
+      type: 'unknown',
+      features: [],
     };
+  }
+
+  private getFrameworkVersion(framework: string): string {
+    try {
+      switch (framework) {
+        case 'next':
+          return (window as any).__NEXT_DATA__?.buildId || 'unknown';
+        case 'react':
+          return (window as any).React?.version || 'unknown';
+        case 'vue':
+          return (window as any).Vue?.version || 'unknown';
+        case 'angular':
+          return (
+            document
+              .querySelector('[ng-version]')
+              ?.getAttribute('ng-version') || 'unknown'
+          );
+        default:
+          return 'unknown';
+      }
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  private detectBuildTools(): ProjectMetrics['buildTools'] {
+    const buildTools: ProjectMetrics['buildTools'] = {};
+
+    // Detect bundler
+    if (document.querySelector('script[src*="webpack"]')) {
+      buildTools.bundler = 'webpack';
+    } else if (document.querySelector('script[type="module"][src*="vite"]')) {
+      buildTools.bundler = 'vite';
+    }
+
+    // Detect transpiler
+    if (document.querySelector('script[type="text/babel"]')) {
+      buildTools.transpiler = 'babel';
+    } else if (document.querySelector('script[src*=".tsx"]')) {
+      buildTools.transpiler = 'typescript';
+    }
+
+    // Detect package manager from meta tags or scripts
+    const packageManager = document
+      .querySelector('meta[name="package-manager"]')
+      ?.getAttribute('content');
+    if (packageManager) {
+      buildTools.packageManager = packageManager;
+    }
+
+    return buildTools;
+  }
+
+  private detectDependencies(): ProjectMetrics['dependencies'] {
+    const deps: ProjectMetrics['dependencies'] = {
+      ui: [],
+      state: [],
+      routing: [],
+      styling: [],
+      testing: [],
+    };
+
+    // Detect UI libraries efficiently using Set for deduplication
+    const uiLibraries = new Set<string>();
+
+    // Use single querySelectorAll for better performance
+    const elements = document.querySelectorAll('*');
+    const classNames = new Set<string>();
+
+    elements.forEach((el) => {
+      el.classList.forEach((className) => classNames.add(className));
+    });
+
+    // Check class patterns
+    if (classNames.has('MuiButton') || classNames.has('MuiBox'))
+      uiLibraries.add('material-ui');
+    if (Array.from(classNames).some((c) => c.startsWith('chakra-')))
+      uiLibraries.add('chakra-ui');
+    if (Array.from(classNames).some((c) => c.startsWith('ant-')))
+      uiLibraries.add('ant-design');
+    if (this.hasTailwindClasses(classNames)) uiLibraries.add('tailwind');
+
+    deps.ui = Array.from(uiLibraries);
+
+    // Detect state management
+    if ((window as any).__REDUX_DEVTOOLS_EXTENSION__) deps.state.push('redux');
+    if ((window as any).__RECOIL_DEVTOOLS_GLOBAL_HOOK__)
+      deps.state.push('recoil');
+    if ((window as any).__ZUSTAND_DEVTOOLS__) deps.state.push('zustand');
+
+    // Detect routing
+    if (this.metrics.framework.name === 'Next.js') {
+      deps.routing.push('next-router');
+    } else if ((window as any).ReactRouter) {
+      deps.routing.push('react-router');
+    }
+
+    // Detect styling solutions
+    if (document.querySelector('style[data-styled]'))
+      deps.styling.push('styled-components');
+    if (document.querySelector('style[data-emotion]'))
+      deps.styling.push('emotion');
+    if (this.hasTailwindClasses(classNames)) deps.styling.push('tailwind');
+
+    return deps;
+  }
+
+  private hasTailwindClasses(classNames: Set<string>): boolean {
+    const tailwindPatterns = [
+      'flex',
+      'grid',
+      'px-',
+      'py-',
+      'mx-',
+      'my-',
+      'bg-',
+      'text-',
+    ];
+    return tailwindPatterns.some((pattern) =>
+      Array.from(classNames).some((className) => className.startsWith(pattern))
+    );
+  }
+
+  private detectFeatures(): ProjectMetrics['features'] {
+    return {
+      ssr: this.detectSSR(),
+      pwa: this.detectPWA(),
+      webgl: this.detectWebGL(),
+      localStorage: this.detectLocalStorage(),
+      serviceWorker: this.detectServiceWorker(),
+      api: {
+        rest: this.detectRestAPI(),
+        graphql: this.detectGraphQL(),
+        websocket: this.detectWebSocket(),
+      },
+    };
+  }
+
+  private detectSSR(): boolean {
+    return !!(
+      document.getElementById('__NEXT_DATA__') ||
+      document.getElementById('__NUXT__') ||
+      document.querySelector('[data-server-rendered]')
+    );
+  }
+
+  private detectPWA(): boolean {
+    return !!(
+      document.querySelector('link[rel="manifest"]') && navigator.serviceWorker
+    );
+  }
+
+  private detectWebGL(): boolean {
+    try {
+      const canvas = document.createElement('canvas');
+      return !!(
+        canvas.getContext('webgl') || canvas.getContext('experimental-webgl')
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private detectLocalStorage(): boolean {
+    try {
+      return !!window.localStorage;
+    } catch {
+      return false;
+    }
+  }
+
+  private detectServiceWorker(): boolean {
+    return 'serviceWorker' in navigator;
+  }
+
+  private detectRestAPI(): boolean {
+    return !!(
+      document.querySelector('script[src*="/api/"]') ||
+      document.querySelector('link[href*="/api/"]')
+    );
+  }
+
+  private detectGraphQL(): boolean {
+    return !!(
+      (window as any).__APOLLO_CLIENT__ ||
+      document.querySelector('script[src*="graphql"]')
+    );
+  }
+
+  private detectWebSocket(): boolean {
+    return 'WebSocket' in window;
+  }
+
+  private detectRepository(): ProjectMetrics['repository'] {
+    const repoInfo: ProjectMetrics['repository'] = {
+      type: 'unknown',
+    };
+
+    try {
+      // Check for monorepo configurations
+      if (this.detectTurboRepo()) {
+        repoInfo.type = 'monorepo';
+        repoInfo.manager = 'turbo';
+      } else if (this.detectNxRepo()) {
+        repoInfo.type = 'monorepo';
+        repoInfo.manager = 'nx';
+      } else if (this.detectLernaRepo()) {
+        repoInfo.type = 'monorepo';
+        repoInfo.manager = 'lerna';
+      }
+    } catch (error) {
+      console.warn('Error detecting repository type:', error);
+    }
+
+    return repoInfo;
+  }
+
+  private detectTurboRepo(): boolean {
+    return !!(
+      document.querySelector('meta[name="turbo-cache"]') ||
+      (window as any).__TURBO_DATA__
+    );
+  }
+
+  private detectNxRepo(): boolean {
+    return !!(
+      document.querySelector('meta[name="nx-workspace"]') ||
+      (window as any).__NX_WORKSPACE__
+    );
+  }
+
+  private detectLernaRepo(): boolean {
+    return !!document.querySelector('meta[name="lerna-workspace"]');
+  }
+
+  private getMainFeatures(): string[] {
     const features: string[] = [];
 
-    if (deps.next) {
-      features.push('app-router', 'server-components');
-      return { name: 'Next.js', version: deps.next, type: 'next', features };
-    }
-    if (deps.react)
-      return { name: 'React', version: deps.react, type: 'react', features };
-    if (deps.vue)
-      return { name: 'Vue', version: deps.vue, type: 'vue', features };
-    if (deps.angular)
-      return {
-        name: 'Angular',
-        version: deps.angular,
-        type: 'angular',
-        features,
-      };
-    if (deps.svelte)
-      return { name: 'Svelte', version: deps.svelte, type: 'svelte', features };
+    if (this.metrics.features.ssr) features.push('SSR');
+    if (this.metrics.features.pwa) features.push('PWA');
+    if (this.metrics.features.webgl) features.push('WebGL');
+    if (this.metrics.features.api.graphql) features.push('GraphQL');
 
-    return { name: 'Unknown', version: '0.0.0', type: 'other', features: [] };
+    return features;
   }
 
-  private analyzeDependencies(
-    packageJson: any
-  ): ProjectMetrics['dependencies'] {
-    const deps = packageJson.dependencies || {};
-    const devDeps = packageJson.devDependencies || {};
-
-    return {
-      total: Object.keys(deps).length + Object.keys(devDeps).length,
-      direct: Object.keys(deps).length,
-      dev: Object.keys(devDeps).length,
-      types: Object.keys(devDeps).filter((dep) => dep.startsWith('@types/'))
-        .length,
-      outdated: 0, // Would need npm outdated check
-      security: {
-        high: 0,
-        medium: 0,
-        low: 0,
-      },
-    };
-  }
-
-  private detectFeatures(packageJson: any): ProjectMetrics['features'] {
-    const allDeps = {
-      ...packageJson.dependencies,
-      ...packageJson.devDependencies,
-    };
-
-    return {
-      typescript: !!allDeps.typescript || !!packageJson.types,
-      testing: !!(
-        allDeps.jest ||
-        allDeps.vitest ||
-        allDeps['@testing-library/react']
-      ),
-      storybook: !!allDeps['@storybook/react'],
-      i18n: !!(
-        allDeps.i18next ||
-        allDeps['next-i18next'] ||
-        allDeps['vue-i18n']
-      ),
-      pwa: !!(allDeps['next-pwa'] || allDeps.workbox),
-      ssg: !!(allDeps.gatsby || packageJson?.scripts?.['generate']),
-      ssr: !!(allDeps.next || packageJson?.scripts?.['ssr']),
-      analytics: !!(allDeps.analytics || allDeps['@segment/analytics-next']),
-      seo: !!(allDeps.next || allDeps['react-helmet'] || allDeps['next-seo']),
-    };
-  }
-
-  private analyzeBuildConfig(packageJson: any): ProjectMetrics['build'] {
-    const allDeps = {
-      ...packageJson.dependencies,
-      ...packageJson.devDependencies,
-    };
-
-    return {
-      bundler: this.detectBundler(allDeps),
-      transpiler: this.detectTranspiler(allDeps),
-      cssProcessor: this.detectCssProcessor(allDeps),
-      optimization: {
-        treeshaking: true, // Modern bundlers have this by default
-        minification: true,
-        splitting: true,
-      },
-    };
-  }
-
-  private detectBundler(deps: Record<string, string>): string {
-    if (deps.webpack) return 'webpack';
-    if (deps.vite) return 'vite';
-    if (deps.rollup) return 'rollup';
-    if (deps.parcel) return 'parcel';
-    if (deps.esbuild) return 'esbuild';
-    return 'unknown';
-  }
-
-  private detectTranspiler(deps: Record<string, string>): string {
-    if (deps['@babel/core']) return 'babel';
-    if (deps.typescript) return 'typescript';
-    if (deps.swc) return 'swc';
-    return 'unknown';
-  }
-
-  private detectCssProcessor(deps: Record<string, string>): string | undefined {
-    if (deps.sass) return 'sass';
-    if (deps.less) return 'less';
-    if (deps.stylus) return 'stylus';
-    if (deps.tailwindcss) return 'tailwind';
-    return undefined;
-  }
-
-  private getEnvironmentInfo(): ProjectMetrics['environment'] {
-    return {
-      nodeVersion: process.version,
-      npmVersion: process.env.npm_version || '',
-      platform: process.platform,
-      arch: process.arch,
-    };
-  }
-
-  private async analyzePerformance(): Promise<ProjectMetrics['performance']> {
-    return {
-      buildTime: 0, // Would need build hooks
-      bundleSize: {
-        total: 0,
-        js: 0,
-        css: 0,
-        assets: 0,
-      },
-      treeshakability: 0,
-    };
-  }
-
-  private initializeMetrics(): ProjectMetrics {
-    return {
-      framework: {
-        name: '',
-        version: '',
-        type: 'other',
-        features: [],
-      },
-      package: {
-        name: '',
-        version: '',
-        dependencies: {},
-        devDependencies: {},
-        scripts: {},
-      },
-      environment: {
-        nodeVersion: '',
-        npmVersion: '',
-        platform: '',
-        arch: '',
-      },
-      build: {
-        bundler: '',
-        transpiler: '',
-        optimization: {
-          treeshaking: false,
-          minification: false,
-          splitting: false,
-        },
-      },
-      dependencies: {
-        total: 0,
-        direct: 0,
-        dev: 0,
-        types: 0,
-        outdated: 0,
-        security: {
-          high: 0,
-          medium: 0,
-          low: 0,
-        },
-      },
-      features: {
-        typescript: false,
-        testing: false,
-        storybook: false,
-        i18n: false,
-        pwa: false,
-        ssg: false,
-        ssr: false,
-        analytics: false,
-        seo: false,
-      },
-      performance: {
-        buildTime: 0,
-        bundleSize: {
-          total: 0,
-          js: 0,
-          css: 0,
-          assets: 0,
-        },
-        treeshakability: 0,
-      },
-    };
+  private getEnvironmentSummary(): string {
+    return `${this.metrics.environment.platform} | ${this.metrics.buildSystem.type}`;
   }
 
   cleanup(): void {
-    // No cleanup needed for project analysis
+    // No cleanup needed for project tracker
   }
 }

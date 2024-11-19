@@ -1,117 +1,144 @@
 export interface AnalyticsConfig {
   sessionId: string;
-  disabled?: boolean;
   debug?: boolean;
-  options?: {
+  options: {
     pageViews?: boolean;
     navigation?: boolean;
     engagement?: boolean;
     forms?: boolean;
-    search?: boolean;
-    content?: boolean;
     heatmaps?: boolean;
-    media?: boolean;
+    seo?: boolean;
+    project?: boolean;
+    performance?: boolean;
     demographics?: boolean;
+    error?: boolean;
+    media?: boolean;
+    search?: boolean;
+  };
+  batchConfig?: {
+    maxBatchSize?: number;
+    flushInterval?: number;
   };
 }
 
-// Page Views
 export interface PageViewData {
   url: string;
-  referrer: string;
-  timestamp: string;
-  timeSpent: number;
+  title: string;
+  timestamp: number;
+  referrer?: string;
 }
 
-// Navigation
 export interface NavigationData {
-  entryPage: string;
-  exitPage?: string;
-  pathTaken: string[];
-  backButtonUsed: boolean;
+  from: string;
+  to: string;
+  type: 'pushState' | 'replaceState' | 'popState';
+  timestamp: number;
 }
 
-// Engagement
 export interface EngagementData {
-  clicks: ClickData[];
-  scroll: ScrollData;
-  hover: HoverData[];
-  video?: VideoInteractionData;
+  type: string;
+  element: string;
+  timestamp: number;
+  data?: any;
 }
 
-// Forms
-export interface FormData {
+export interface CustomFormData {
   formId: string;
-  fields: FormFieldInteraction[];
-  timeSpent: number;
-  abandoned: boolean;
+  action: string;
+  fields: Record<string, any>;
+  timestamp: number;
 }
 
-// Demographics
 export interface UserDemographics {
-  device: DeviceInfo;
-  location: GeoLocation;
-  trafficSource: TrafficSource;
-  userType: UserType;
+  device: string;
+  browser: string;
+  os: string;
+  language: string;
+  location?: {
+    country?: string;
+    region?: string;
+    city?: string;
+  };
 }
 
-// Supporting interfaces
 export interface ClickData {
-  elementId?: string;
-  elementType: string;
-  position: { x: number; y: number };
-  timestamp: string;
+  x: number;
+  y: number;
+  element: string;
+  timestamp: number;
 }
 
 export interface ScrollData {
-  maxDepth: number;
-  timestamps: { depth: number; time: string }[];
+  depth: number;
+  direction: 'up' | 'down';
+  timestamp: number;
 }
 
 export interface HoverData {
-  elementId?: string;
+  element: string;
   duration: number;
-  timestamp: string;
+  timestamp: number;
 }
 
-interface VideoInteractionData {
-  videoId: string;
-  actions: Array<{
-    type: 'play' | 'pause' | 'skip' | 'complete';
-    timestamp: string;
-  }>;
+declare global {
+  interface Window {
+    // Framework detection
+    __NEXT_DATA__?: any;
+    __NUXT__?: any;
+    next?: any;
+    React?: { version: string };
+    Vue?: { version: string };
+    angular?: any;
+    Svelte?: any;
+    Gatsby?: any;
+    __GATSBY?: any;
+    Remix?: any;
+    __remixManifest?: any;
+
+    // Build tools
+    webpackJsonp?: any[];
+    __vite__?: any;
+    parcelRequire?: any;
+
+    // State management
+    __REDUX_DEVTOOLS_EXTENSION__?: any;
+    __RECOIL_DEVTOOLS_GLOBAL_HOOK__?: any;
+    Vuex?: any;
+
+    // Testing
+    Jest?: any;
+    Cypress?: any;
+    Playwright?: any;
+
+    // React DevTools
+    __REACT_DEVTOOLS_GLOBAL_HOOK__?: any;
+  }
+
+  interface Navigator {
+    connection?: {
+      effectiveType: string;
+      downlink: number;
+      rtt?: number;
+      saveData?: boolean;
+    };
+  }
+
+  interface PerformanceResourceEntry extends PerformanceEntry {
+    initiatorType: string;
+    transferSize: number;
+    nextHopProtocol: string;
+  }
 }
 
-export interface FormFieldInteraction {
-  fieldId: string;
-  timeSpent: number;
-  completed: boolean;
-}
-
-interface DeviceInfo {
-  type: 'mobile' | 'desktop' | 'tablet';
-  os: string;
-  browser: string;
-  version: string;
-}
-
-interface GeoLocation {
-  country: string;
-  region?: string;
-  city?: string;
-  timezone: string;
-}
-
-interface TrafficSource {
-  referrer?: string;
-  utm?: {
-    campaign?: string;
-    source?: string;
-    medium?: string;
-  };
-}
-
-interface UserType {
-  isNew: boolean;
-  isRegistered: boolean;
-}
+// Export types without conflicts
+export type {
+  AnalyticsConfig,
+  PageViewData,
+  NavigationData,
+  EngagementData,
+  CustomFormData as FormData,
+  UserDemographics,
+  ClickData,
+  ScrollData,
+  HoverData,
+};
